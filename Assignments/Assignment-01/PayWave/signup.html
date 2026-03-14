@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PayWave Sign Up</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a href="index.html" class="logo">PayWave</a>
+      <nav class="main-nav">
+        <a href="personal.html">Personal</a>
+        <a href="business.html">Business</a>
+        <a href="how-it-works.html">How it works</a>
+        <a href="help.html">Help</a>
+      </nav>
+      <div class="header-actions">
+        <a href="login.html" class="link">Log In</a>
+        <a href="signup.html" class="btn primary">Sign Up</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="section light">
+      <div class="container">
+        <h1>Create your PayWave account</h1>
+        <p style="margin-top:0.5rem;margin-bottom:1.5rem;font-size:0.95rem;color:#516270;">Fill in a few details to get started with PayWave.</p>
+        <form style="max-width:420px;display:flex;flex-direction:column;gap:0.8rem;">
+          <fieldset style="border:none;padding:0;margin:0 0 0.4rem 0;">
+            <legend style="font-size:0.9rem;margin-bottom:0.3rem;">Account type</legend>
+            <label style="font-size:0.88rem;margin-right:0.8rem;">
+              <input type="radio" name="accountType" value="personal" checked>
+              Personal
+            </label>
+            <label style="font-size:0.88rem;">
+              <input type="radio" name="accountType" value="business">
+              Business
+            </label>
+          </fieldset>
+          <label>
+            <span style="display:block;margin-bottom:0.2rem;font-size:0.9rem;">Full name</span>
+            <input type="text" name="fullName" required minlength="3" style="width:100%;padding:0.55rem 0.65rem;border-radius:6px;border:1px solid #cfd6e6;font-family:inherit;font-size:0.9rem;">
+          </label>
+          <label>
+            <span style="display:block;margin-bottom:0.2rem;font-size:0.9rem;">Email</span>
+            <input type="email" name="email" required style="width:100%;padding:0.55rem 0.65rem;border-radius:6px;border:1px solid #cfd6e6;font-family:inherit;font-size:0.9rem;">
+          </label>
+          <label>
+            <span style="display:block;margin-bottom:0.2rem;font-size:0.9rem;">Password</span>
+            <input
+              type="password"
+              name="password"
+              required
+              minlength="8"
+              pattern="(?=.*[A-Za-z])(?=.*\d)(?=.*[@$!%*?&]).{8,}"
+              title="At least 8 characters with a letter, a number and a special character"
+              style="width:100%;padding:0.55rem 0.65rem;border-radius:6px;border:1px solid #cfd6e6;font-family:inherit;font-size:0.9rem;"
+            >
+          </label>
+          <label>
+            <span style="display:block;margin-bottom:0.2rem;font-size:0.9rem;">Country</span>
+            <input type="text" name="country" required minlength="2" style="width:100%;padding:0.55rem 0.65rem;border-radius:6px;border:1px solid #cfd6e6;font-family:inherit;font-size:0.9rem;">
+          </label>
+          <button type="submit" class="btn primary" style="margin-top:0.4rem;align-self:flex-start;">Sign up</button>
+          <p style="font-size:0.85rem;color:#516270;">Already have an account? <a href="login.html" class="link">Log in</a>.</p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-col">
+        <h3>PayWave</h3>
+        <p>Simple, secure payments for everyday life.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Products</h4>
+        <ul>
+          <li><a href="personal.html">Personal</a></li>
+          <li><a href="business.html">Business</a></li>
+          <li><a href="personal.html">Send money</a></li>
+          <li><a href="personal.html">Request money</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Help</h4>
+        <ul>
+          <li><a href="help.html">Help Center</a></li>
+          <li><a href="help.html#resolution-center">Resolution Center</a></li>
+          <li><a href="help.html">Contact us</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Stay connected</h4>
+        <p>Download the app or visit us on the web.</p>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div class="container footer-bottom-inner">
+        <p>© 2026 PayWave Clone. For study use only.</p>
+        <div class="footer-links">
+          <a href="help.html">Privacy</a>
+          <a href="help.html">Legal</a>
+          <a href="help.html">Cookies</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
+
