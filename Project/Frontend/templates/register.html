@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Create Account — FreeLancer Pro{% endblock %}
+{% block extra_head %}
+<style>
+.auth-wrap { min-height: calc(100vh - 64px); display:flex; align-items:center; justify-content:center; padding:2rem 1.5rem; }
+.auth-card { width:100%; max-width:500px; background:var(--bg2); border:1px solid var(--border); border-radius:20px; padding:2.5rem; }
+.auth-title { font-family:var(--font-display); font-size:1.75rem; font-weight:800; color:var(--text); margin-bottom:.375rem; }
+.auth-sub { color:var(--text2); font-size:.9375rem; margin-bottom:2rem; }
+.role-picker { display:grid; grid-template-columns:1fr 1fr; gap:.75rem; margin-bottom:1.5rem; }
+.role-option { position:relative; cursor:pointer; }
+.role-option input { position:absolute; opacity:0; }
+.role-label {
+  display:flex; flex-direction:column; align-items:center; gap:.5rem;
+  padding:1rem; border:1.5px solid var(--border); border-radius:var(--radius);
+  cursor:pointer; transition:all .2s; text-align:center; background:var(--bg3);
+}
+.role-label:hover { border-color:var(--border2); }
+.role-option input:checked + .role-label {
+  border-color:var(--accent); background:rgba(108,99,255,0.08);
+  box-shadow:0 0 0 3px var(--accent-glow);
+}
+.role-icon { font-size:1.75rem; }
+.role-name { font-weight:600; font-size:.9375rem; color:var(--text); }
+.role-desc { font-size:.75rem; color:var(--text3); }
+.divider-or { display:flex; align-items:center; gap:1rem; margin:1.25rem 0; color:var(--text3); font-size:.8125rem; }
+.divider-or::before,.divider-or::after { content:''; flex:1; height:1px; background:var(--border); }
+</style>
+{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-title">Create your account</div>
+    <div class="auth-sub">Join FreeLancer Pro — free forever</div>
+    <div id="alert-box"></div>
+
+    <div class="form-group">
+      <div class="form-label">I am a...</div>
+      <div class="role-picker">
+        <label class="role-option">
+          <input type="radio" name="role" value="client" id="role-client">
+          <div class="role-label">
+            <span class="role-icon">👨‍💼</span>
+            <span class="role-name">Client</span>
+            <span class="role-desc">I want to hire talent</span>
+          </div>
+        </label>
+        <label class="role-option">
+          <input type="radio" name="role" value="freelancer" id="role-freelancer">
+          <div class="role-label">
+            <span class="role-icon">👨‍💻</span>
+            <span class="role-name">Freelancer</span>
+            <span class="role-desc">I want to find work</span>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Username</label>
+      <input type="text" id="username" class="form-input" placeholder="e.g. john_doe">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Email address</label>
+      <input type="email" id="email" class="form-input" placeholder="you@example.com">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Password</label>
+      <input type="password" id="password" class="form-input" placeholder="At least 6 characters">
+    </div>
+    <div class="form-group" id="skills-group" style="display:none">
+      <label class="form-label">Your skills <span style="color:var(--text3)">(comma separated)</span></label>
+      <input type="text" id="skills" class="form-input" placeholder="e.g. Python, React, UI Design, Node.js">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Short bio <span style="color:var(--text3)">(optional)</span></label>
+      <textarea id="bio" class="form-textarea" placeholder="Tell others a bit about yourself..." rows="2"></textarea>
+    </div>
+
+    <button class="btn btn-primary" style="width:100%;padding:12px" onclick="doRegister()" id="reg-btn">
+      Create account →
+    </button>
+    <div class="divider-or">or</div>
+    <div style="text-align:center;font-size:.875rem;color:var(--text2)">
+      Already have an account? <a href="/login" style="color:var(--accent2);font-weight:500">Sign in</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+// Pre-select role from query param
+const params = new URLSearchParams(location.search);
+if(params.get('role')==='client') document.getElementById('role-client').checked=true;
+if(params.get('role')==='freelancer') { document.getElementById('role-freelancer').checked=true; showSkills(); }
+
+document.querySelectorAll('input[name=role]').forEach(r=>{
+  r.addEventListener('change', ()=>{
+    document.getElementById('skills-group').style.display = r.value==='freelancer'?'block':'none';
+  });
+});
+function showSkills(){ document.getElementById('skills-group').style.display='block'; }
+
+async function doRegister() {
+  const role = document.querySelector('input[name=role]:checked')?.value;
+  const username = document.getElementById('username').value.trim();
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const skills = document.getElementById('skills').value;
+  const bio = document.getElementById('bio').value;
+  const box = document.getElementById('alert-box');
+  const btn = document.getElementById('reg-btn');
+
+  if(!role){box.innerHTML='<div class="alert alert-error">Please select a role</div>';return;}
+  if(!username||!email||!password){box.innerHTML='<div class="alert alert-error">Please fill all required fields</div>';return;}
+
+  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Creating...';
+  const {ok,data} = await apiFetch('/api/register',{method:'POST',body:JSON.stringify({username,email,password,role,skills,bio})});
+  if(ok){ showToast('Account created! Redirecting...','success'); setTimeout(()=>window.location.href='/login',1000); }
+  else { box.innerHTML=`<div class="alert alert-error">${data.error}</div>`; btn.disabled=false; btn.innerHTML='Create account →'; }
+}
+</script>
+{% endblock %}

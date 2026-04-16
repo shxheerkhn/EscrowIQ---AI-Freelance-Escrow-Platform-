@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Client Dashboard — FreeLancer Pro{% endblock %}
+{% block extra_head %}
+<style>
+.fraud-bar{height:6px;border-radius:4px;background:var(--bg4);overflow:hidden;margin-top:6px;}
+.fraud-fill-low{background:var(--green);}
+.fraud-fill-medium{background:var(--yellow);}
+.fraud-fill-high{background:var(--red);}
+.job-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;transition:border-color .2s;}
+.job-card:hover{border-color:var(--border2);}
+.stat-icon{font-size:1.5rem;margin-bottom:.5rem;}
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-wrapper">
+  <div class="flex items-center justify-between mb-4" style="margin-bottom:2rem">
+    <div class="page-header" style="margin-bottom:0">
+      <h1 class="page-title">Client Dashboard</h1>
+      <p class="page-subtitle">Welcome back, <strong style="color:var(--accent2)">{{ user.username }}</strong> — manage your projects</p>
+    </div>
+    <button class="btn btn-primary" onclick="openModal('post-job-modal')">+ Post a Job</button>
+  </div>
+
+  <!-- Stats -->
+  <div class="grid-4" id="stats-grid">
+    <div class="stat-card"><div class="stat-icon">💼</div><div class="stat-label">Total Jobs</div><div class="stat-value" id="s-total">—</div></div>
+    <div class="stat-card"><div class="stat-icon">🟢</div><div class="stat-label">Active Jobs</div><div class="stat-value" id="s-active">—</div></div>
+    <div class="stat-card"><div class="stat-icon">📬</div><div class="stat-label">Total Proposals</div><div class="stat-value" id="s-proposals">—</div></div>
+    <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-label">Your Balance</div><div class="stat-value" id="s-balance">—</div></div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Jobs List -->
+  <div class="flex items-center justify-between" style="margin-bottom:1.25rem">
+    <h2 class="font-display" style="font-size:1.125rem;font-weight:600">Your Job Postings</h2>
+    <span class="text-muted text-sm">{{ jobs|length }} job{{ 's' if jobs|length != 1 else '' }}</span>
+  </div>
+
+  {% if jobs %}
+  <div style="display:flex;flex-direction:column;gap:.875rem">
+    {% for job in jobs %}
+    <div class="job-card">
+      <div class="flex items-center justify-between" style="flex-wrap:wrap;gap:.75rem">
+        <div style="flex:1;min-width:0">
+          <div class="flex items-center gap-3" style="flex-wrap:wrap">
+            <a href="/jobs/{{ job.id }}" style="font-family:var(--font-display);font-size:1rem;font-weight:600;color:var(--text);text-decoration:none">{{ job.title }}</a>
+            <span class="badge badge-{{ 'open' if job.status=='open' else 'closed' }}">{{ job.status.replace('_',' ').title() }}</span>
+            <span class="badge badge-{{ job.fraud_level|lower }}">🔍 {{ job.fraud_level }} Risk</span>
+          </div>
+          <div class="text-sm text-muted mt-1" style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:.5rem">
+            <span>💰 ${{ "%.0f"|format(job.budget) }}</span>
+            <span>📅 Due {{ job.deadline }}</span>
+            <span>🏷️ {{ job.skills_required[:60] }}{% if job.skills_required|length > 60 %}...{% endif %}</span>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <a href="/jobs/{{ job.id }}" class="btn btn-ghost btn-sm">View proposals</a>
+          <button class="btn btn-danger btn-sm" onclick="deleteJob({{ job.id }}, this)">Delete</button>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">📭</div>
+    <div class="empty-title">No jobs posted yet</div>
+    <div class="empty-text">Click "Post a Job" to find the perfect freelancer for your project.</div>
+    <button class="btn btn-primary" onclick="openModal('post-job-modal')">Post your first job →</button>
+  </div>
+  {% endif %}
+</div>
+
+<!-- POST JOB MODAL -->
+<div class="modal-overlay" id="post-job-modal">
+  <div class="modal" style="max-width:620px">
+    <div class="modal-header">
+      <span class="modal-title">Post a New Job</span>
+      <button class="modal-close" onclick="closeModal('post-job-modal')">×</button>
+    </div>
+    <div id="job-alert"></div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Job Title *</label>
+        <input type="text" id="j-title" class="form-input" placeholder="e.g. React Developer for E-Commerce">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Budget (USD) *</label>
+        <input type="number" id="j-budget" class="form-input" placeholder="e.g. 500" min="1">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Skills Required * <span class="text-muted text-xs">(comma separated)</span></label>
+      <input type="text" id="j-skills" class="form-input" placeholder="e.g. Python, Django, PostgreSQL, REST API">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Job Description *</label>
+      <textarea id="j-desc" class="form-textarea" rows="4" placeholder="Describe the project in detail — what needs to be built, expected deliverables, any specific requirements..."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Deadline *</label>
+      <input type="date" id="j-deadline" class="form-input">
+    </div>
+    <div id="fraud-preview" style="display:none;margin-bottom:1rem;padding:1rem;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2)">
+      <div class="flex items-center justify-between">
+        <span class="text-sm" style="font-weight:500">AI Fraud Analysis</span>
+        <span id="fp-badge" class="badge">—</span>
+      </div>
+      <div id="fp-reasons" class="text-xs text-muted mt-1"></div>
+    </div>
+    <div class="flex gap-3">
+      <button class="btn btn-ghost" onclick="closeModal('post-job-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="postJob()" style="flex:2" id="post-btn">Post Job & Analyze →</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+// Load stats
+(async()=>{
+  const{data}=await apiFetch('/api/stats');
+  document.getElementById('s-total').textContent=data.total_jobs||0;
+  document.getElementById('s-active').textContent=data.active_jobs||0;
+  document.getElementById('s-proposals').textContent=data.total_proposals||0;
+  document.getElementById('s-balance').textContent='$'+(data.balance||0).toFixed(0);
+})();
+
+// Set min date
+document.getElementById('j-deadline').min=new Date().toISOString().split('T')[0];
+
+async function postJob(){
+  const title=document.getElementById('j-title').value.trim();
+  const desc=document.getElementById('j-desc').value.trim();
+  const skills=document.getElementById('j-skills').value.trim();
+  const budget=document.getElementById('j-budget').value;
+  const deadline=document.getElementById('j-deadline').value;
+  const box=document.getElementById('job-alert');
+  const btn=document.getElementById('post-btn');
+  if(!title||!desc||!skills||!budget||!deadline){
+    box.innerHTML='<div class="alert alert-error">All fields are required</div>';return;
+  }
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Analyzing & posting...';
+  const{ok,data}=await apiFetch('/api/jobs',{method:'POST',body:JSON.stringify({title,description:desc,skills_required:skills,budget,deadline})});
+  if(ok){
+    const fp=document.getElementById('fraud-preview');
+    const badge=document.getElementById('fp-badge');
+    const reasons=document.getElementById('fp-reasons');
+    fp.style.display='block';
+    badge.className=`badge badge-${data.fraud_level.toLowerCase()}`;
+    badge.textContent=`${data.fraud_level} Risk (Score: ${data.fraud_score}/10)`;
+    reasons.textContent=data.fraud_reasons.length?'Flags: '+data.fraud_reasons.join(', '):'No flags detected';
+    btn.innerHTML='✓ Posted!';
+    setTimeout(()=>location.reload(),1800);
+  } else {
+    box.innerHTML=`<div class="alert alert-error">${data.error}</div>`;
+    btn.disabled=false;btn.innerHTML='Post Job & Analyze →';
+  }
+}
+
+async function deleteJob(id, btn){
+  if(!confirm('Delete this job posting?'))return;
+  btn.disabled=true;
+  const{ok,data}=await apiFetch(`/api/jobs/${id}`,{method:'DELETE'});
+  if(ok){showToast('Job deleted','success');btn.closest('.job-card').remove();}
+  else{showToast(data.error,'error');btn.disabled=false;}
+}
+</script>
+{% endblock %}

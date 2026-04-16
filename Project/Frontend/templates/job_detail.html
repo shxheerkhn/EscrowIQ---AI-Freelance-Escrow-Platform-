@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} — FreeLancer Pro{% endblock %}
+{% block extra_head %}
+<style>
+.match-bar{height:8px;border-radius:4px;background:var(--bg4);overflow:hidden;margin-top:6px;}
+.match-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent2));}
+.proposal-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;margin-bottom:.875rem;}
+.proposal-card.accepted-card{border-color:rgba(16,185,129,.3);background:rgba(16,185,129,.04);}
+.ai-section{background:linear-gradient(135deg,rgba(108,99,255,.08),rgba(167,139,250,.05));border:1px solid rgba(108,99,255,.15);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;}
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-wrapper">
+  <a href="/dashboard" class="btn btn-ghost btn-sm" style="margin-bottom:1.5rem">← Back to Dashboard</a>
+
+  <div style="display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;align-items:start">
+    <!-- Left Column: Job Details + Proposals -->
+    <div>
+      <!-- Job Header -->
+      <div class="card" style="margin-bottom:1.25rem">
+        <div class="flex items-center gap-3" style="flex-wrap:wrap;margin-bottom:1rem">
+          <h1 class="font-display" style="font-size:1.5rem;font-weight:700;flex:1">{{ job.title }}</h1>
+          <span class="badge badge-{{ 'open' if job.status=='open' else 'closed' }}">{{ job.status.replace('_',' ').title() }}</span>
+        </div>
+        <div class="flex gap-4" style="flex-wrap:wrap;margin-bottom:1.25rem">
+          <div class="text-sm"><span class="text-muted">Client:</span> <strong>{{ job.client_name }}</strong></div>
+          <div class="text-sm"><span class="text-muted">Budget:</span> <strong style="color:var(--green)">${{ "%.0f"|format(job.budget) }}</strong></div>
+          <div class="text-sm"><span class="text-muted">Deadline:</span> <strong>{{ job.deadline }}</strong></div>
+          <div class="text-sm"><span class="text-muted">Posted:</span> {{ job.created_at[:10] }}</div>
+        </div>
+        <div style="margin-bottom:1.25rem">
+          <div class="form-label">Required Skills</div>
+          <div style="display:flex;flex-wrap:wrap;gap:.375rem">
+            {% for skill in job.skills_required.split(',') %}
+            <span class="skill-tag">{{ skill.strip() }}</span>
+            {% endfor %}
+          </div>
+        </div>
+        <div>
+          <div class="form-label">Description</div>
+          <div style="color:var(--text2);line-height:1.75;white-space:pre-line">{{ job.description }}</div>
+        </div>
+      </div>
+
+      <!-- Fraud Analysis Card -->
+      <div class="card" style="margin-bottom:1.25rem">
+        <div class="flex items-center justify-between" style="margin-bottom:.75rem">
+          <span class="font-display" style="font-weight:600">🔍 AI Fraud Analysis</span>
+          <span class="badge badge-{{ job.fraud_level|lower }}">{{ job.fraud_level }} Risk — Score {{ job.fraud_score }}/10</span>
+        </div>
+        <div class="progress-bar" style="margin-bottom:.75rem">
+          <div class="progress-fill" style="width:{{ job.fraud_score * 10 }}%;background:{% if job.fraud_level=='Low' %}var(--green){% elif job.fraud_level=='Medium' %}var(--yellow){% else %}var(--red){% endif %}"></div>
+        </div>
+        {% if fraud_reasons %}
+        <div class="text-sm text-muted">
+          <div style="font-weight:500;color:var(--text2);margin-bottom:.375rem">Flags detected:</div>
+          {% for r in fraud_reasons %}<div style="margin-bottom:3px">⚠️ {{ r }}</div>{% endfor %}
+        </div>
+        {% else %}
+        <div class="text-sm text-success">✓ No fraud indicators detected — this looks like a legitimate posting</div>
+        {% endif %}
+      </div>
+
+      <!-- CLIENT: Proposals List -->
+      {% if user.role == 'client' and job.client_id == user.id %}
+      <div>
+        <h2 class="font-display" style="font-size:1.125rem;font-weight:600;margin-bottom:1rem">
+          Proposals Received ({{ proposals|length }})
+        </h2>
+        {% if proposals %}
+        {% for p in proposals %}
+        <div class="proposal-card {{ 'accepted-card' if p.status=='accepted' else '' }}">
+          <div class="flex items-center justify-between" style="flex-wrap:wrap;gap:.75rem;margin-bottom:.875rem">
+            <div>
+              <div class="flex items-center gap-2">
+                <span style="font-weight:600;color:var(--text)">{{ p.freelancer_name }}</span>
+                <span class="badge badge-{{ p.status }}">{{ p.status.title() }}</span>
+              </div>
+              <div class="text-sm text-muted" style="margin-top:3px">
+                ⭐ {{ "%.1f"|format(p.freelancer_rating) }} ({{ p.total_reviews }} reviews) &nbsp;|&nbsp;
+                Skills: {{ p.freelancer_skills or 'Not specified' }}
+              </div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-family:var(--font-display);font-size:1.25rem;font-weight:700;color:var(--green)">${{ "%.0f"|format(p.bid_amount) }}</div>
+              <div class="text-xs text-muted">Timeline: {{ p.timeline }}</div>
+            </div>
+          </div>
+          <div style="padding:.75rem;background:var(--bg2);border-radius:var(--radius-sm);margin-bottom:.875rem">
+            <div class="text-xs text-muted" style="margin-bottom:.375rem">Cover Letter</div>
+            <div class="text-sm" style="color:var(--text2);white-space:pre-line">{{ p.cover_letter }}</div>
+          </div>
+          {% if p.status == 'pending' and job.status == 'open' %}
+          <div class="flex gap-2">
+            <button class="btn btn-success btn-sm" onclick="acceptProposal({{ p.id }})">✓ Accept</button>
+            <button class="btn btn-danger btn-sm" onclick="rejectProposal({{ p.id }})">✗ Reject</button>
+            <button class="btn btn-ghost btn-sm" onclick="openEscrowModal({{ p.id }}, '{{ p.freelancer_name }}', {{ p.freelancer_id }}, {{ p.bid_amount }})">
+              💰 Fund Escrow
+            </button>
+          </div>
+          {% elif p.status == 'accepted' %}
+          {% if not escrow_info %}
+          <button class="btn btn-primary btn-sm" onclick="openEscrowModal({{ p.id }}, '{{ p.freelancer_name }}', {{ p.freelancer_id }}, {{ p.bid_amount }})">
+            💰 Fund Escrow for this freelancer
+          </button>
+          {% endif %}
+          {% endif %}
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="empty-state" style="padding:2.5rem">
+          <div class="empty-icon">📭</div>
+          <div class="empty-title">No proposals yet</div>
+          <div class="empty-text">Check back soon — freelancers will be applying shortly.</div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- FREELANCER: Apply Section -->
+      {% elif user.role == 'freelancer' %}
+      {% if user_proposal %}
+      <div class="card" style="border-color:rgba(108,99,255,.3)">
+        <div class="flex items-center gap-2" style="margin-bottom:.75rem">
+          <span style="font-size:1.25rem">📤</span>
+          <span class="font-display" style="font-weight:600">Your Proposal</span>
+          <span class="badge badge-{{ user_proposal.status }}">{{ user_proposal.status.title() }}</span>
+        </div>
+        <div class="text-sm text-muted">
+          <strong>Bid:</strong> ${{ "%.0f"|format(user_proposal.bid_amount) }} &nbsp;|&nbsp;
+          <strong>Timeline:</strong> {{ user_proposal.timeline }}
+        </div>
+        <div style="margin-top:.75rem;padding:.75rem;background:var(--bg3);border-radius:var(--radius-sm)">
+          <div class="text-xs text-muted" style="margin-bottom:.375rem">Your cover letter</div>
+          <div class="text-sm" style="white-space:pre-line;color:var(--text2)">{{ user_proposal.cover_letter }}</div>
+        </div>
+      </div>
+      {% elif job.status == 'open' %}
+      <div class="ai-section">
+        <div class="flex items-center gap-2" style="margin-bottom:1rem">
+          <span style="font-size:1.25rem">🤖</span>
+          <span class="font-display" style="font-weight:600">Apply to this Job</span>
+        </div>
+        <div id="apply-alert"></div>
+        <div class="form-group">
+          <label class="form-label">Your Bid Amount (USD)</label>
+          <input type="number" id="bid" class="form-input" placeholder="e.g. 450" min="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Delivery Timeline</label>
+          <input type="text" id="timeline" class="form-input" placeholder="e.g. 7 days, 2 weeks">
+        </div>
+        <div class="form-group">
+          <div class="flex items-center justify-between" style="margin-bottom:.5rem">
+            <label class="form-label" style="margin:0">Cover Letter</label>
+            <button class="btn btn-ghost btn-sm" style="font-size:.75rem" onclick="generateProposal()">
+              🤖 AI Generate →
+            </button>
+          </div>
+          <textarea id="cover-letter" class="form-textarea" rows="6" placeholder="Write a compelling proposal..."></textarea>
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="submitProposal()" id="apply-btn">
+          Submit Proposal →
+        </button>
+      </div>
+      {% else %}
+      <div class="alert alert-warning">This job is no longer accepting proposals.</div>
+      {% endif %}
+      {% endif %}
+    </div>
+
+    <!-- Right Column: Sidebar -->
+    <div>
+      <!-- Escrow Status (if client) -->
+      {% if user.role == 'client' and job.client_id == user.id %}
+      {% if escrow_info %}
+      <div class="card" style="margin-bottom:1.25rem;border-color:rgba(16,185,129,.2)">
+        <div class="flex items-center gap-2" style="margin-bottom:1rem">
+          <span style="font-size:1.25rem">🔒</span>
+          <span class="font-display" style="font-weight:600">Escrow Status</span>
+        </div>
+        <div style="font-family:var(--font-display);font-size:2rem;font-weight:800;color:var(--green)">${{ "%.2f"|format(escrow_info.amount) }}</div>
+        <div class="badge badge-{{ 'accepted' if escrow_info.status=='held' else 'closed' }}" style="margin-top:.5rem">
+          {{ 'Held in Escrow' if escrow_info.status=='held' else escrow_info.status.title() }}
+        </div>
+        {% if escrow_info.status == 'held' %}
+        <div style="margin-top:1rem;display:flex;flex-direction:column;gap:.5rem">
+          <button class="btn btn-success btn-sm" onclick="releaseEscrow({{ escrow_info.id }})">💸 Release Payment</button>
+          <button class="btn btn-danger btn-sm" onclick="refundEscrow({{ escrow_info.id }})">↩ Refund to me</button>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- AI Match Panel -->
+      {% if matched %}
+      <div class="ai-section" style="margin-bottom:1.25rem">
+        <div class="flex items-center gap-2" style="margin-bottom:1rem">
+          <span style="font-size:1.25rem">🎯</span>
+          <span class="font-display" style="font-weight:600">AI Smart Matches</span>
+        </div>
+        <div class="text-xs text-muted" style="margin-bottom:1rem">Top freelancers matched to your job skills</div>
+        {% for m in matched %}
+        <div style="padding:.875rem;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:.625rem">
+          <div class="flex items-center justify-between" style="margin-bottom:.375rem">
+            <span style="font-weight:600;font-size:.9375rem">{{ m.username }}</span>
+            <span style="font-size:.8125rem;font-weight:700;color:var(--accent2)">{{ m.match_pct }}%</span>
+          </div>
+          <div class="match-bar"><div class="match-fill" style="width:{{ m.match_pct }}%"></div></div>
+          <div class="text-xs text-muted" style="margin-top:.5rem">
+            ⭐ {{ "%.1f"|format(m.rating) }} &nbsp;·&nbsp;
+            Matched: {{ m.matched_skills|join(', ') }}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% endif %}
+
+      <!-- Quick Job Info -->
+      <div class="card">
+        <div class="font-display" style="font-weight:600;margin-bottom:1rem">Job Summary</div>
+        <div style="display:flex;flex-direction:column;gap:.625rem">
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-muted">Status</span>
+            <span class="badge badge-{{ 'open' if job.status=='open' else 'closed' }}">{{ job.status.replace('_',' ').title() }}</span>
+          </div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-muted">Budget</span>
+            <strong class="text-success">${{ "%.0f"|format(job.budget) }}</strong>
+          </div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-muted">Deadline</span>
+            <strong>{{ job.deadline }}</strong>
+          </div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-muted">Risk Level</span>
+            <span class="badge badge-{{ job.fraud_level|lower }}">{{ job.fraud_level }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Escrow Deposit Modal -->
+<div class="modal-overlay" id="escrow-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">💰 Fund Escrow</span>
+      <button class="modal-close" onclick="closeModal('escrow-modal')">×</button>
+    </div>
+    <div id="escrow-alert"></div>
+    <p class="text-sm text-muted" style="margin-bottom:1.25rem">
+      Funds will be held securely until you approve the work and release payment to <strong id="escrow-fl-name" style="color:var(--text)">the freelancer</strong>.
+    </p>
+    <div class="form-group">
+      <label class="form-label">Escrow Amount (USD)</label>
+      <input type="number" id="escrow-amount" class="form-input" placeholder="Enter amount">
+    </div>
+    <div class="flex gap-3">
+      <button class="btn btn-ghost" onclick="closeModal('escrow-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="fundEscrow()" style="flex:2" id="escrow-btn">🔒 Lock in Escrow</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let escrowFreelancerId=null, escrowJobId={{ job.id }};
+
+function openEscrowModal(proposalId, flName, flId, suggestedAmount){
+  escrowFreelancerId=flId;
+  document.getElementById('escrow-fl-name').textContent=flName;
+  document.getElementById('escrow-amount').value=Math.round(suggestedAmount);
+  openModal('escrow-modal');
+}
+
+async function acceptProposal(id){
+  if(!confirm('Accept this proposal? Other proposals will be rejected.'))return;
+  const{ok,data}=await apiFetch(`/api/proposals/${id}/accept`,{method:'POST'});
+  if(ok){showToast('Proposal accepted!','success');setTimeout(()=>location.reload(),1000);}
+  else showToast(data.error,'error');
+}
+async function rejectProposal(id){
+  const{ok,data}=await apiFetch(`/api/proposals/${id}/reject`,{method:'POST'});
+  if(ok){showToast('Proposal rejected','info');setTimeout(()=>location.reload(),800);}
+  else showToast(data.error,'error');
+}
+async function fundEscrow(){
+  const amount=document.getElementById('escrow-amount').value;
+  const btn=document.getElementById('escrow-btn');
+  const box=document.getElementById('escrow-alert');
+  if(!amount||amount<=0){box.innerHTML='<div class="alert alert-error">Enter a valid amount</div>';return;}
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Locking...';
+  const{ok,data}=await apiFetch('/api/escrow/deposit',{method:'POST',body:JSON.stringify({job_id:escrowJobId,amount:parseFloat(amount),freelancer_id:escrowFreelancerId})});
+  if(ok){showToast(data.message,'success');setTimeout(()=>location.reload(),1200);}
+  else{box.innerHTML=`<div class="alert alert-error">${data.error}</div>`;btn.disabled=false;btn.innerHTML='🔒 Lock in Escrow';}
+}
+async function releaseEscrow(id){
+  if(!confirm('Release payment to the freelancer? This cannot be undone.'))return;
+  const{ok,data}=await apiFetch(`/api/escrow/${id}/release`,{method:'POST'});
+  if(ok){showToast(data.message,'success');setTimeout(()=>location.reload(),1000);}
+  else showToast(data.error,'error');
+}
+async function refundEscrow(id){
+  if(!confirm('Refund escrow to your account?'))return;
+  const{ok,data}=await apiFetch(`/api/escrow/${id}/refund`,{method:'POST'});
+  if(ok){showToast(data.message,'success');setTimeout(()=>location.reload(),1000);}
+  else showToast(data.error,'error');
+}
+async function generateProposal(){
+  const btn=event.target;
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span>';
+  const{ok,data}=await apiFetch('/api/ai/generate-proposal',{method:'POST',body:JSON.stringify({job_id:{{ job.id }}})});
+  if(ok){document.getElementById('cover-letter').value=data.proposal;showToast('Proposal generated by AI!','success');}
+  else showToast(data.error,'error');
+  btn.disabled=false;btn.innerHTML='🤖 AI Generate →';
+}
+
+async function submitProposal(){
+  const bid=document.getElementById('bid').value;
+  const timeline=document.getElementById('timeline').value.trim();
+  const cover=document.getElementById('cover-letter').value.trim();
+  const btn=document.getElementById('apply-btn');
+  const box=document.getElementById('apply-alert');
+  if(!bid||!timeline||!cover){box.innerHTML='<div class="alert alert-error">All fields are required</div>';return;}
+  btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Submitting...';
+  const{ok,data}=await apiFetch('/api/proposals',{method:'POST',body:JSON.stringify({job_id:{{ job.id }},bid_amount,parseFloat(bid),timeline,cover_letter:cover})});
+  if(ok){showToast('Proposal submitted!','success');setTimeout(()=>location.reload(),1000);}
+  else{box.innerHTML=`<div class="alert alert-error">${data.error}</div>`;btn.disabled=false;btn.innerHTML='Submit Proposal →';}
+}
+</script>
+{% endblock %}
