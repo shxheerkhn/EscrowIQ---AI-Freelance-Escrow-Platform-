@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Create Account — FreeLancer Pro{% endblock %}
+{% block extra_head %}
+<style>
+.auth-wrap{min-height:calc(100vh - 64px);display:flex;align-items:center;justify-content:center;padding:2rem 1.5rem;}
+.auth-card{width:100%;max-width:500px;background:var(--bg2);border:1px solid var(--border);border-radius:24px;padding:2.5rem;box-shadow:var(--shadow);}
+.auth-brand{display:flex;align-items:center;gap:10px;margin-bottom:2rem;}
+.auth-title{font-family:var(--font-h);font-size:1.75rem;font-weight:700;color:var(--text);margin-bottom:.375rem;}
+.auth-sub{color:var(--text2);margin-bottom:2rem;}
+.role-grid{display:grid;grid-template-columns:1fr 1fr;gap:.875rem;margin-bottom:1.5rem;}
+.role-option{position:relative;cursor:pointer;}
+.role-option input{position:absolute;opacity:0;pointer-events:none;}
+.role-label{
+  display:flex;flex-direction:column;align-items:center;gap:.5rem;
+  padding:1.25rem 1rem;border:1.5px solid var(--border2);border-radius:var(--radius);
+  cursor:pointer;transition:all .2s;text-align:center;background:var(--bg3);
+}
+.role-label:hover{border-color:var(--border3);}
+.role-icon{font-size:2rem;}
+.role-name{font-weight:600;font-size:.9375rem;color:var(--text);}
+.role-desc{font-size:.72rem;color:var(--text3);}
+.role-option input:checked + .role-label{
+  border-color:var(--violet);background:var(--violet-s);
+  box-shadow:0 0 0 3px rgba(124,111,255,.15);
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <div class="nav-logo">FP</div>
+      <span style="font-family:var(--font-h);font-weight:700;color:var(--text2)">FreeLancer Pro</span>
+    </div>
+    <div class="auth-title">Create your account</div>
+    <div class="auth-sub">Start for free — no credit card required</div>
+    <div id="alert-box"></div>
+
+    <div class="form-group">
+      <div class="form-label">I want to...</div>
+      <div class="role-grid">
+        <label class="role-option">
+          <input type="radio" name="role" value="client" id="role-client">
+          <div class="role-label">
+            <span class="role-icon">👨‍💼</span>
+            <span class="role-name">Hire Talent</span>
+            <span class="role-desc">Post jobs & find freelancers</span>
+          </div>
+        </label>
+        <label class="role-option">
+          <input type="radio" name="role" value="freelancer" id="role-freelancer">
+          <div class="role-label">
+            <span class="role-icon">👨‍💻</span>
+            <span class="role-name">Find Work</span>
+            <span class="role-desc">Apply to jobs & get paid</span>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Username *</label>
+        <input type="text" id="username" class="form-input" placeholder="e.g. john_dev">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Email *</label>
+        <input type="email" id="email" class="form-input" placeholder="you@example.com">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Password *</label>
+      <input type="password" id="password" class="form-input" placeholder="At least 6 characters">
+    </div>
+    <div class="form-group" id="skills-group" style="display:none">
+      <label class="form-label">Your Skills <span class="text-dim">(comma separated)</span></label>
+      <input type="text" id="skills" class="form-input" placeholder="e.g. Python, React, UI Design, Node.js">
+      <div class="form-hint">Add your top skills so clients can find you through AI matching</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Short Bio <span class="text-dim">(optional)</span></label>
+      <textarea id="bio" class="form-textarea" rows="2" placeholder="Tell others a bit about yourself..."></textarea>
+    </div>
+
+    <button class="btn btn-gradient w-full" style="padding:14px;font-size:1rem" onclick="doRegister()" id="reg-btn">
+      Create account →
+    </button>
+    <div class="divider-text">or</div>
+    <div style="text-align:center;font-size:.875rem;color:var(--text2)">
+      Already have an account? <a href="/login" style="color:var(--violet2);font-weight:600">Sign in</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const params = new URLSearchParams(location.search);
+if (params.get('role') === 'client')     document.getElementById('role-client').checked = true;
+if (params.get('role') === 'freelancer') { document.getElementById('role-freelancer').checked = true; document.getElementById('skills-group').style.display='block'; }
+
+document.querySelectorAll('input[name=role]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.getElementById('skills-group').style.display = r.value === 'freelancer' ? 'block' : 'none';
+  });
+});
+
+async function doRegister() {
+  const role     = document.querySelector('input[name=role]:checked')?.value;
+  const username = document.getElementById('username').value.trim();
+  const email    = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const skills   = document.getElementById('skills').value;
+  const bio      = document.getElementById('bio').value;
+  const box = document.getElementById('alert-box');
+  const btn = document.getElementById('reg-btn');
+
+  if (!role)     { box.innerHTML = '<div class="alert alert-error">Please select a role</div>'; return; }
+  if (!username || !email || !password) { box.innerHTML = '<div class="alert alert-error">Please fill all required fields</div>'; return; }
+
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Creating account…';
+  const { ok, data } = await apiFetch('/api/register', { method:'POST', body:JSON.stringify({username,email,password,role,skills,bio}) });
+  if (ok) {
+    box.innerHTML = '<div class="alert alert-success">✅ Account created! Redirecting to login…</div>';
+    setTimeout(() => window.location.href = '/login', 1000);
+  } else {
+    box.innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+    btn.disabled = false; btn.innerHTML = 'Create account →';
+  }
+}
+document.getElementById('password').addEventListener('keydown', e => { if(e.key==='Enter') doRegister(); });
+</script>
+{% endblock %}
