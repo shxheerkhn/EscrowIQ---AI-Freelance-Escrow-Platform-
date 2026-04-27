@@ -1,36 +1,43 @@
 {% extends "base.html" %}
-{% block title %}My Profile — FreeLancer Pro{% endblock %}
+{% block title %}My Profile - EscrowIQ{% endblock %}
 {% block content %}
 <div class="page-wrapper" style="max-width:740px">
-  <div class="page-header"><h1 class="page-title">My Profile</h1><p class="page-subtitle">Manage your account and settings</p></div>
+  <div class="page-header">
+    <h1 class="page-title">My Profile</h1>
+    <p class="page-subtitle">Manage your account and settings</p>
+  </div>
 
-  <!-- Profile Header -->
   <div class="card card-glow" style="margin-bottom:1.5rem">
     <div class="flex items-center gap-4" style="margin-bottom:1.5rem;flex-wrap:wrap">
-      <div class="avatar avatar-xl">{{ user.username[0].upper() }}</div>
+      <div class="avatar avatar-xl">{{ (user.full_name or user.username)[0].upper() }}</div>
       <div style="flex:1;min-width:0">
-        <div class="font-h" style="font-size:1.375rem;font-weight:700">{{ user.username }}</div>
-        <div class="text-muted text-sm" style="margin:.25rem 0">{{ user.email }}</div>
+        <div class="font-h" style="font-size:1.375rem;font-weight:700">{{ user.full_name or user.username }}</div>
+        <div class="text-muted text-sm" style="margin:.25rem 0">@{{ user.username }} · {{ user.email }}</div>
         <div class="flex items-center gap-2 flex-wrap">
           <span class="badge" style="background:var(--violet-g);color:var(--violet2);border-color:rgba(124,111,255,.2)">
-            {{ '👨‍💻 Freelancer' if user.role=='freelancer' else '👨‍💼 Client' }}
+            {{ 'Freelancer' if user.role=='freelancer' else 'Client' }}
           </span>
-          {% if user.rating > 0 %}<span class="badge badge-accepted">⭐ {{ "%.1f"|format(user.rating) }}</span>{% endif %}
+          {% if user.rating > 0 %}<span class="badge badge-accepted">Rating {{ "%.1f"|format(user.rating) }}</span>{% endif %}
         </div>
       </div>
       <div style="text-align:right">
         <div class="text-xs text-dim">Balance</div>
         <div class="font-h" style="font-size:2rem;font-weight:800;color:var(--emerald2)">${{ "%.2f"|format(user.balance) }}</div>
-        <div class="text-xs text-dim">Member since {{ user.created_at[:10] }}</div>
+        <div class="text-xs text-dim">Member since {{ format_date(user.created_at) }}</div>
       </div>
     </div>
     <hr class="divider" style="margin:0">
   </div>
 
-  <!-- Edit Form -->
   <div class="card" style="margin-bottom:1.5rem">
     <div class="font-h font-semibold" style="margin-bottom:1.25rem">Edit Profile</div>
     <div id="profile-alert"></div>
+
+    <div class="form-group">
+      <label class="form-label">Full Name</label>
+      <input type="text" id="full-name" class="form-input" value="{{ user.full_name or '' }}" placeholder="e.g. Sarah Mitchell">
+    </div>
+
     {% if user.role == 'freelancer' %}
     <div class="form-group">
       <label class="form-label">Your Skills <span class="text-dim">(comma separated)</span></label>
@@ -38,14 +45,14 @@
       <div class="form-hint">Skills used by AI to match you with relevant jobs</div>
     </div>
     {% endif %}
+
     <div class="form-group">
       <label class="form-label">Bio</label>
-      <textarea id="bio" class="form-textarea" rows="3" placeholder="Tell clients and freelancers about yourself…">{{ user.bio or '' }}</textarea>
+      <textarea id="bio" class="form-textarea" rows="3" placeholder="Tell clients and freelancers about yourself...">{{ user.bio or '' }}</textarea>
     </div>
     <button class="btn btn-gradient" onclick="saveProfile()" id="save-btn">Save Changes</button>
   </div>
 
-  <!-- Recent Activity -->
   {% if user.role == 'client' and recent_jobs %}
   <div class="card">
     <div class="font-h font-semibold" style="margin-bottom:1.25rem">Recent Job Postings</div>
@@ -78,15 +85,28 @@
 {% block scripts %}
 <script>
 async function saveProfile() {
-  const bio    = document.getElementById('bio').value.trim();
+  const fullName = document.getElementById('full-name').value.trim();
+  const bio = document.getElementById('bio').value.trim();
   const skillsEl = document.getElementById('skills');
   const skills = skillsEl ? skillsEl.value.trim() : '';
   const btn = document.getElementById('save-btn');
-  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving…';
-  const { ok, data } = await apiFetch('/api/profile', {method:'PUT', body:JSON.stringify({bio,skills})});
-  if (ok) showToast('Profile updated! ✅', 'success');
-  else    document.getElementById('profile-alert').innerHTML = `<div class="alert alert-error">${data.error}</div>`;
-  btn.disabled = false; btn.innerHTML = 'Save Changes';
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Saving...';
+  const { ok, data } = await apiFetch('/api/profile', {
+    method:'PUT',
+    body:JSON.stringify({ full_name: fullName, bio, skills })
+  });
+
+  if (ok) {
+    showToast('Profile updated successfully', 'success');
+    setTimeout(() => location.reload(), 500);
+  } else {
+    document.getElementById('profile-alert').innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = 'Save Changes';
 }
 </script>
 {% endblock %}

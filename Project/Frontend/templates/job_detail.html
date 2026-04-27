@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ job.title }} — FreeLancer Pro{% endblock %}
+{% block title %}{{ job.title }} — EscrowIQ{% endblock %}
 {% block content %}
 <div class="page-wrapper">
   <a href="{{ '/dashboard' if user.role=='client' else '/jobs' }}" class="btn btn-ghost btn-sm" style="margin-bottom:1.5rem">← Back</a>
@@ -27,7 +27,7 @@
         <div class="flex gap-4 flex-wrap text-sm" style="margin-bottom:1.25rem;padding-bottom:1.25rem;border-bottom:1px solid var(--border)">
           <span class="text-muted">📅 Deadline: <strong style="color:var(--text)">{{ job.deadline }}</strong></span>
           <span class="text-muted">📬 <strong style="color:var(--text)">{{ job.proposal_count }}</strong> proposals</span>
-          <span class="text-muted">🕒 Posted {{ job.created_at[:10] }}</span>
+          <span class="text-muted">🕒 Posted {{ format_date(job.created_at) }}</span>
         </div>
         <div style="margin-bottom:1.25rem">
           <div class="form-label">Required Skills</div>
@@ -41,10 +41,10 @@
         </div>
       </div>
 
-      <!-- AI Fraud Analysis -->
+      <!-- Fraud Analysis -->
       <div class="card" style="margin-bottom:1.25rem;border-color:{% if job.fraud_level=='High' %}rgba(244,63,94,.3){% elif job.fraud_level=='Medium' %}rgba(245,158,11,.25){% else %}rgba(16,217,138,.2){% endif %}">
         <div class="flex items-center justify-between" style="margin-bottom:.875rem">
-          <span class="font-h font-semibold">🔍 AI Fraud Analysis</span>
+          <span class="font-h font-semibold">🔍 Fraud Analysis</span>
           <span class="badge badge-{{ job.fraud_level|lower }}">{{ job.fraud_level }} Risk — {{ job.fraud_score }}/10</span>
         </div>
         <div class="progress-bar {% if job.fraud_level!='High' %}progress-emerald{% endif %}" style="margin-bottom:.75rem">
@@ -52,7 +52,11 @@
         </div>
         {% if fraud_reasons %}
         <div style="display:flex;flex-direction:column;gap:.375rem">
-          {% for r in fraud_reasons %}<div class="text-sm" style="color:var(--amber2)">⚠️ {{ r }}</div>{% endfor %}
+          {% for r in fraud_reasons %}
+          <div class="text-sm" style="color:var(--amber2)">
+            ⚠️ {% if r is mapping %}{{ r.category }} — {{ r.flag }}{% else %}{{ r }}{% endif %}
+          </div>
+          {% endfor %}
         </div>
         {% else %}
         <div class="text-sm text-emerald">✅ No fraud indicators found — this looks like a legitimate posting.</div>
@@ -93,7 +97,6 @@
           <div class="flex gap-2 flex-wrap">
             <button class="btn btn-success btn-sm" onclick="acceptProposal({{ p.id }})">✓ Accept</button>
             <button class="btn btn-danger btn-sm"  onclick="rejectProposal({{ p.id }})">✗ Reject</button>
-            <button class="btn btn-cyan btn-sm"    onclick="openEscrowModal({{ p.id }},'{{ p.freelancer_name }}',{{ p.freelancer_id }},{{ p.bid_amount }})">💰 Fund Escrow</button>
           </div>
           {% elif p.status == 'accepted' and not escrow_info %}
           <button class="btn btn-gradient btn-sm" onclick="openEscrowModal({{ p.id }},'{{ p.freelancer_name }}',{{ p.freelancer_id }},{{ p.bid_amount }})">
@@ -104,6 +107,48 @@
         {% endfor %}
         {% else %}
         <div class="card"><div class="empty-state" style="padding:2rem"><div class="empty-icon">📭</div><div class="empty-title">No proposals yet</div><div class="empty-text">Freelancers will start applying shortly.</div></div></div>
+        {% endif %}
+
+        {% if escrow_info %}
+        <div class="card card-cyan" style="margin-top:1rem">
+          <div class="font-h font-semibold" style="margin-bottom:.8rem">Delivery Review</div>
+          {% if latest_submission %}
+          <div class="text-sm text-muted" style="margin-bottom:.6rem">
+            Latest delivery from <strong style="color:var(--text)">{{ latest_submission.freelancer_name }}</strong>
+            on {{ format_date(latest_submission.created_at) }}
+          </div>
+          <div class="card" style="padding:1rem;background:rgba(255,255,255,.02);margin-bottom:.8rem">
+            <div class="text-xs text-dim" style="margin-bottom:.35rem">Delivery note</div>
+            <div class="text-sm text-muted" style="white-space:pre-line">{{ latest_submission.delivery_message or 'Shared via work link only.' }}</div>
+            {% if latest_submission.delivery_url %}
+            <a href="{{ latest_submission.delivery_url }}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="margin-top:.8rem">Open work link</a>
+            {% endif %}
+            {% if latest_submission.upload_archive_path %}
+            <a href="/submissions/{{ latest_submission.id }}/download" class="btn btn-ghost btn-sm" style="margin-top:.8rem">Download uploaded archive</a>
+            {% endif %}
+            {% if latest_submission.client_feedback %}
+            <div style="margin-top:.9rem;padding:.875rem;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:var(--radius-sm)">
+              <div class="text-xs text-dim" style="margin-bottom:.35rem">Latest client feedback</div>
+              <div class="text-sm text-muted" style="white-space:pre-line">{{ latest_submission.client_feedback }}</div>
+            </div>
+            {% endif %}
+          </div>
+          {% if escrow_info.status == 'held' %}
+          <div class="flex gap-2 flex-wrap" style="margin-bottom:.8rem">
+            <button class="btn btn-success btn-sm" onclick="approveSubmission({{ latest_submission.id }})">Approve work and release</button>
+            <button class="btn btn-ghost btn-sm" onclick="requestChanges({{ latest_submission.id }})">Request changes</button>
+            <button class="btn btn-danger btn-sm" onclick="fileComplaint('client')">File complaint</button>
+          </div>
+          <div class="form-hint">Only request changes that are part of the original job requirements and agreed scope.</div>
+          {% endif %}
+          {% else %}
+          <div class="text-sm text-muted">Escrow is funded. Waiting for the freelancer to submit delivery for review.</div>
+          {% endif %}
+
+          {% if open_complaints %}
+          <div class="alert alert-warning" style="margin-top:.8rem">An open complaint already exists for this job and is waiting for admin review.</div>
+          {% endif %}
+        </div>
         {% endif %}
       </div>
 
@@ -126,6 +171,50 @@
         </div>
         {% if user_proposal.status == 'accepted' %}
         <div class="alert alert-success mt-3">🎉 Congratulations! Your proposal was accepted. Wait for the client to fund escrow.</div>
+        {% if escrow_info and escrow_info.status == 'held' %}
+        <div class="card" style="margin-top:1rem;padding:1rem;background:rgba(255,255,255,.02)">
+          <div class="text-xs text-dim" style="margin-bottom:.4rem">My work submission</div>
+          {% if latest_submission and latest_submission.freelancer_id == user.id %}
+          <div class="text-sm text-muted" style="margin-bottom:.75rem">Latest submission status: <strong style="color:var(--text)">{{ latest_submission.status.replace('_',' ') }}</strong></div>
+          {% if latest_submission.client_feedback %}
+          <div style="margin-bottom:.8rem;padding:.875rem;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:var(--radius-sm)">
+            <div class="text-xs text-dim" style="margin-bottom:.35rem">Client feedback</div>
+            <div class="text-sm text-muted" style="white-space:pre-line">{{ latest_submission.client_feedback }}</div>
+          </div>
+          {% endif %}
+          {% if latest_submission.upload_archive_path %}
+          <a href="/submissions/{{ latest_submission.id }}/download" class="btn btn-ghost btn-sm" style="margin-bottom:.8rem">Download my uploaded archive</a>
+          {% endif %}
+          {% endif %}
+          <div id="submit-work-alert"></div>
+          <div class="form-group">
+            <label class="form-label">Delivery note</label>
+            <textarea id="delivery-message" class="form-textarea" rows="5" placeholder="Explain what you completed, what to test, and any final notes."></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Work link</label>
+            <input type="url" id="delivery-url" class="form-input" placeholder="GitHub repo, Drive link, live demo, etc.">
+          </div>
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">Upload a zip</label>
+              <input type="file" id="delivery-zip" class="form-input" accept=".zip">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Or choose a folder</label>
+              <input type="file" id="delivery-folder" class="form-input" webkitdirectory directory multiple>
+            </div>
+          </div>
+          <div class="form-hint">Use either a zip archive or a folder selection. Folder uploads are packaged into a zip for review.</div>
+          <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-gradient btn-sm" onclick="submitWork()" id="submit-work-btn">Submit work for review</button>
+            <button class="btn btn-danger btn-sm" onclick="fileComplaint('freelancer')">File complaint</button>
+          </div>
+          {% if open_complaints %}
+          <div class="alert alert-warning mt-3">A complaint is already open for this job and is waiting for admin review.</div>
+          {% endif %}
+        </div>
+        {% endif %}
         {% endif %}
       </div>
       {% elif job.status == 'open' %}
@@ -183,6 +272,8 @@
         </div>
         {% elif escrow_info.status == 'released' %}
         <div class="text-sm text-emerald">✅ Payment released successfully</div>
+        {% elif escrow_info.status == 'refunded' %}
+        <div class="text-sm" style="color:var(--amber2)">↩ Escrow refunded to your balance</div>
         {% endif %}
       </div>
       {% endif %}
@@ -194,20 +285,23 @@
           <span style="font-size:1.25rem">🎯</span>
           <span class="font-h font-semibold">AI Best Matches</span>
         </div>
-        <div class="text-xs text-dim" style="margin-bottom:1rem">Top freelancers matched by skill compatibility</div>
+        <div class="text-xs text-dim" style="margin-bottom:1rem">Top freelancers ranked by hybrid score using semantic similarity plus business signals</div>
         {% for m in matched %}
         <div style="padding:.875rem;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:.625rem">
           <div class="flex items-center justify-between" style="margin-bottom:.375rem">
             <div class="flex items-center gap-2">
-              <div class="avatar avatar-sm">{{ m.username[0].upper() }}</div>
-              <span class="font-semibold text-sm">{{ m.username }}</span>
+              <div class="avatar avatar-sm">{{ m.full_name[0].upper() }}</div>
+              <span class="font-semibold text-sm">{{ m.full_name }}</span>
             </div>
             <span style="font-family:var(--font-h);font-size:.9375rem;font-weight:700;color:var(--violet2)">{{ m.match_pct }}%</span>
           </div>
           <div class="progress-bar" style="margin-bottom:.5rem"><div class="progress-fill" style="width:{{ m.match_pct }}%"></div></div>
           <div class="text-xs text-dim">
             {% if m.rating %}<span>⭐ {{ "%.1f"|format(m.rating) }}</span> · {% endif %}
-            Matched: {{ m.matched_skills|join(', ') }}
+            Hybrid {{ m.match_pct }}% · Semantic {{ m.semantic_score }}% · Skill {{ m.skill_pct }}%
+          </div>
+          <div class="text-xs text-dim" style="margin-top:.35rem">
+            {% if m.matched_skills %}Matched: {{ m.matched_skills|join(', ') }}{% else %}Matched via semantic profile similarity{% endif %}
           </div>
         </div>
         {% endfor %}
@@ -315,11 +409,83 @@ async function releaseEscrow(id) {
   if (ok) { showToast(data.message, 'success'); setTimeout(() => location.reload(), 900); }
   else    showToast(data.error, 'error');
 }
+async function approveSubmission(id) {
+  if (!confirm('Approve this delivery and release escrow?')) return;
+  const { ok, data } = await apiFetch(`/api/submissions/${id}/approve`, {method:'POST'});
+  if (ok) { showToast(data.message, 'success'); setTimeout(() => location.reload(), 900); }
+  else    showToast(data.error, 'error');
+}
+async function requestChanges(id) {
+  const feedback = prompt('Describe the required changes. Keep them within the original job requirements.');
+  if (!feedback) return;
+  const { ok, data } = await apiFetch(`/api/submissions/${id}/request-changes`, {
+    method:'POST',
+    body: JSON.stringify({ feedback })
+  });
+  if (ok) { showToast(data.message, 'warning'); setTimeout(() => location.reload(), 900); }
+  else    showToast(data.error, 'error');
+}
 async function refundEscrow(id) {
   if (!confirm('Refund escrow amount back to your account?')) return;
   const { ok, data } = await apiFetch(`/api/escrow/${id}/refund`, {method:'POST'});
   if (ok) { showToast(data.message, 'success'); setTimeout(() => location.reload(), 900); }
   else    showToast(data.error, 'error');
+}
+async function submitWork() {
+  const deliveryMessage = document.getElementById('delivery-message')?.value?.trim() || '';
+  const deliveryUrl = document.getElementById('delivery-url')?.value?.trim() || '';
+  const zipFile = document.getElementById('delivery-zip')?.files?.[0] || null;
+  const folderFiles = Array.from(document.getElementById('delivery-folder')?.files || []);
+  const box = document.getElementById('submit-work-alert');
+  const btn = document.getElementById('submit-work-btn');
+  if (zipFile && folderFiles.length) {
+    box.innerHTML = '<div class="alert alert-error">Choose either a zip file or a folder, not both.</div>';
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Submitting...';
+  const formData = new FormData();
+  formData.append('delivery_message', deliveryMessage);
+  formData.append('delivery_url', deliveryUrl);
+  if (zipFile) {
+    formData.append('work_zip', zipFile);
+  }
+  folderFiles.forEach((file) => {
+    formData.append('work_files', file, file.name);
+    formData.append('relative_paths', file.webkitRelativePath || file.name);
+  });
+  const res = await fetch(`/api/jobs/${JOB_ID}/submit-work`, {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': window.CSRF_TOKEN || '' },
+    body: formData
+  });
+  let data;
+  try { data = await res.json(); } catch { data = {}; }
+  const ok = res.ok;
+  if (ok) {
+    showToast(data.message, 'success');
+    setTimeout(() => location.reload(), 900);
+  } else {
+    box.innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+    btn.disabled = false;
+    btn.innerHTML = 'Submit work for review';
+  }
+}
+async function fileComplaint(role) {
+  const message = prompt(role === 'client'
+    ? 'Describe what is wrong with the submission or delivery.'
+    : 'Describe the issue you want admin to review.');
+  if (!message) return;
+  const { ok, data } = await apiFetch(`/api/jobs/${JOB_ID}/complaints`, {
+    method: 'POST',
+    body: JSON.stringify({ message })
+  });
+  if (ok) {
+    showToast(data.message, 'warning');
+    setTimeout(() => location.reload(), 900);
+  } else {
+    showToast(data.error, 'error');
+  }
 }
 async function generateProposal() {
   const btn = document.getElementById('ai-gen-btn');
@@ -351,3 +517,5 @@ function updateCharCount() {
 document.getElementById('cover-letter')?.addEventListener('input', updateCharCount);
 </script>
 {% endblock %}
+
+

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Verify Email - EscrowIQ{% endblock %}
+{% block content %}
+<div class="page-wrapper" style="max-width:560px;padding-top:2rem;padding-bottom:3rem">
+  <section class="card">
+    <div class="page-header" style="margin-bottom:1.1rem">
+      <h1 class="page-title" style="font-size:1.7rem">Verify your email</h1>
+      <p class="page-subtitle">Enter the 6-digit code sent to your inbox to activate your account.</p>
+    </div>
+    <div id="alert-box"></div>
+    <div class="form-group">
+      <label class="form-label">Email</label>
+      <input type="email" id="email" class="form-input" value="{{ preset_email }}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Verification Code</label>
+      <input type="text" id="code" class="form-input" placeholder="6-digit code" maxlength="6">
+    </div>
+    <div class="flex gap-3 flex-wrap">
+      <button class="btn btn-gradient" style="flex:1" onclick="verifyEmail()" id="verify-btn">Verify email</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="resendCode()" id="resend-btn">Resend code</button>
+    </div>
+    <div class="divider-text">or</div>
+    <div style="text-align:center;font-size:.92rem;color:var(--text2)">
+      Back to <a href="/login" style="color:var(--cyan2);font-weight:700;text-decoration:none">sign in</a>
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function verifyEmail() {
+  const email = document.getElementById('email').value.trim();
+  const code = document.getElementById('code').value.trim();
+  const box = document.getElementById('alert-box');
+  const btn = document.getElementById('verify-btn');
+  if (!email || !code) {
+    box.innerHTML = '<div class="alert alert-error">Email and code are required.</div>';
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Verifying';
+  const { ok, data } = await apiFetch('/api/auth/verify-email', {
+    method: 'POST',
+    body: JSON.stringify({ email, code })
+  });
+  if (ok) {
+    box.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+    setTimeout(() => { window.location.href = data.redirect || '/login'; }, 900);
+  } else {
+    box.innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+    btn.disabled = false;
+    btn.innerHTML = 'Verify email';
+  }
+}
+
+async function resendCode() {
+  const email = document.getElementById('email').value.trim();
+  const box = document.getElementById('alert-box');
+  if (!email) {
+    box.innerHTML = '<div class="alert alert-error">Enter your email first.</div>';
+    return;
+  }
+  const { ok, data } = await apiFetch('/api/auth/resend-verification', {
+    method: 'POST',
+    body: JSON.stringify({ email })
+  });
+  box.innerHTML = `<div class="alert ${ok ? 'alert-success' : 'alert-error'}">${ok ? data.message : data.error}</div>`;
+}
+</script>
+{% endblock %}

@@ -1,200 +1,504 @@
-import os
-import sqlite3
-import secrets
-import json
-import re
-import random
-from datetime import datetime
-from flask import (Flask, render_template, request, jsonify,
-                   redirect, url_for, session, g)
-from werkzeug.security import generate_password_hash, check_password_hash
+"""
+FreeLancer Pro
+Backend: Flask + SQLAlchemy Core with PostgreSQL
+"""
+from __future__ import annotations
 
-# ── FIX #1: Always resolve paths relative to THIS file, not the working directory.
-# This means the app works no matter which folder you run it from.
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-TEMPLATE_DIR = os.path.join(PROJECT_ROOT, 'Frontend', 'templates')
-STATIC_DIR   = os.path.join(PROJECT_ROOT, 'Frontend', 'static')
-DATABASE     = os.path.join(BASE_DIR, 'freelance.db')
+import json
+import os
+import random
+import re
+import secrets
+import smtplib
+import ssl
+import zipfile
+from datetime import datetime, timedelta
+from email.message import EmailMessage
+from functools import wraps
+from io import BytesIO
+
+from flask import Flask, g, jsonify, redirect, render_template, request, send_file, session, url_for
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+
+# ML matching module — TF-IDF semantic matching (addition, not replacement)
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fraud_detection import analyze_fraud_ai, fraud_ai_mode, fraud_fallback_enabled, fraud_level_from_score
+from ml_matching import ml_match_freelancers
+
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+BACKEND_DIR = os.path.join(BASE_DIR, "Backend")
+TEMPLATE_DIR = os.path.join(BASE_DIR, "Frontend", "templates")
+STATIC_DIR = os.path.join(BASE_DIR, "Frontend", "static")
+UPLOADS_DIR = os.path.join(BACKEND_DIR, "uploads")
+SUBMISSIONS_DIR = os.path.join(UPLOADS_DIR, "submissions")
+
+# ML matching module — TF-IDF semantic matching (addition, not replacement of existing matcher)
+def load_local_env():
+    # Search for .env in multiple candidate locations so it works whether
+    # app.py is imported directly or via run.py from a different directory.
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),  # same dir as app.py
+        os.path.join(os.getcwd(), ".env"),                                  # current working directory
+        os.path.join(BASE_DIR, ".env"),                                     # legacy parent dir
+    ]
+    for env_path in candidates:
+        if not os.path.exists(env_path):
+            continue
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+        break  # stop after first .env found
+
+
+load_local_env()
 
 app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
+_secret = os.environ.get("SECRET_KEY")
+if not _secret:
+    import warnings
+    _secret = "dev-secret-key-change-in-production"
+    warnings.warn(
+        "SECRET_KEY is not set in your .env file. Using an insecure default. "
+        "Set SECRET_KEY in your .env before deploying.",
+        stacklevel=2,
+    )
+app.secret_key = _secret
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true"
 
-# ── FIX #2: Stable secret key so sessions survive server restarts during dev.
-app.secret_key = os.environ.get('SECRET_KEY', 'freelancer-pro-dev-secret-2025-xK9mP')
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+_engine = None
+_schema_ready = False
 
-# ──────────────────────────────────────────────
-# DATABASE HELPERS
-# ──────────────────────────────────────────────
+
+def admin_email():
+    return os.environ.get("ADMIN_EMAIL", "").strip().lower()
+
+
+def admin_password():
+    return os.environ.get("ADMIN_PASSWORD", "")
+
+
+def is_admin_session():
+    return session.get("is_admin") is True
+
+
+def founder_alert_emails():
+    raw_value = os.environ.get("FOUNDER_ALERT_EMAILS", "").strip()
+    if not raw_value:
+        return []
+    return [email.strip().lower() for email in raw_value.split(",") if email.strip()]
+
+
+def get_database_url():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL environment variable is not set. PostgreSQL is required.")
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg2://" + url[len("postgres://"):]
+    if url.startswith("postgresql://") and "+psycopg2" not in url:
+        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return url
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            get_database_url(),
+            future=True,
+            connect_args={"connect_timeout": 5},  # fail in 5s instead of hanging forever
+        )
+    return _engine
+
+
+def is_postgres():
+    return True  # PostgreSQL only
+
+
+def ensure_schema_ready():
+    global _schema_ready
+    if not _schema_ready:
+        os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
+        init_db()
+        _schema_ready = True
+
+
+def prepare_query(query, args=None):
+    if args is None:
+        return query, {}
+    if isinstance(args, dict):
+        return query, args
+
+    values = list(args)
+    counter = 0
+
+    def replace_placeholder(_match):
+        nonlocal counter
+        token = f"p{counter}"
+        counter += 1
+        return f":{token}"
+
+    converted = re.sub(r"\?", replace_placeholder, query)
+    if counter != len(values):
+        raise ValueError("Mismatch between placeholders and query arguments")
+    return converted, {f"p{i}": value for i, value in enumerate(values)}
+
+
 def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA foreign_keys=ON")
-    return db
+    ensure_schema_ready()
+    conn = getattr(g, "_database", None)
+    if conn is None:
+        conn = g._database = get_engine().connect()
+    return conn
+
 
 @app.teardown_appcontext
-def close_db(exc):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+def close_db(_exc):
+    conn = getattr(g, "_database", None)
+    if conn is not None:
+        conn.close()
 
-def query_db(query, args=(), one=False):
-    cur = get_db().execute(query, args)
-    rv  = cur.fetchall()
-    return (rv[0] if rv else None) if one else rv
 
-def mutate_db(query, args=()):
-    db  = get_db()
-    cur = db.execute(query, args)
-    db.commit()
-    return cur.lastrowid
+def query_db(query, args=None, one=False):
+    statement, params = prepare_query(query, args)
+    result = get_db().execute(text(statement), params)
+    rows = [dict(row) for row in result.mappings().all()]
+    return (rows[0] if rows else None) if one else rows
+
+
+def mutate_db(query, args=None):
+    statement, params = prepare_query(query, args)
+    conn = get_db()
+    result = conn.execute(text(statement), params)
+
+    returned_id = None
+    if result.returns_rows:
+        row = result.first()
+        if row is not None:
+            returned_id = row[0]
+    elif getattr(result, "lastrowid", None) is not None:
+        returned_id = result.lastrowid
+
+    conn.commit()
+    return returned_id
+
 
 def init_db():
-    """Create all tables. Safe to call multiple times (IF NOT EXISTS)."""
-    db = sqlite3.connect(DATABASE)
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT    UNIQUE NOT NULL,
-            email         TEXT    UNIQUE NOT NULL,
-            password      TEXT    NOT NULL,
-            role          TEXT    NOT NULL CHECK(role IN ('client','freelancer')),
-            skills        TEXT    DEFAULT '',
-            bio           TEXT    DEFAULT '',
-            rating        REAL    DEFAULT 0.0,
-            total_reviews INTEGER DEFAULT 0,
-            balance       REAL    DEFAULT 1000.0,
-            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS jobs (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_id       INTEGER NOT NULL,
-            title           TEXT    NOT NULL,
-            description     TEXT    NOT NULL,
-            skills_required TEXT    NOT NULL,
-            budget          REAL    NOT NULL,
-            deadline        TEXT    NOT NULL,
-            status          TEXT    DEFAULT 'open',
-            fraud_score     INTEGER DEFAULT 0,
-            fraud_level     TEXT    DEFAULT 'Low',
-            fraud_reasons   TEXT    DEFAULT '[]',
-            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(client_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS proposals (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id        INTEGER NOT NULL,
-            freelancer_id INTEGER NOT NULL,
-            cover_letter  TEXT    NOT NULL,
-            bid_amount    REAL    NOT NULL,
-            timeline      TEXT    NOT NULL,
-            status        TEXT    DEFAULT 'pending',
-            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(job_id, freelancer_id),
-            FOREIGN KEY(job_id)        REFERENCES jobs(id),
-            FOREIGN KEY(freelancer_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS escrow (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id        INTEGER NOT NULL,
-            client_id     INTEGER NOT NULL,
-            freelancer_id INTEGER,
-            amount        REAL    NOT NULL,
-            status        TEXT    DEFAULT 'held',
-            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            released_at   TIMESTAMP,
-            FOREIGN KEY(job_id) REFERENCES jobs(id)
-        );
-        CREATE TABLE IF NOT EXISTS notifications (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
-            message    TEXT    NOT NULL,
-            type       TEXT    DEFAULT 'info',
-            is_read    INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-    """)
-    db.commit()
-    db.close()
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    username VARCHAR(30) UNIQUE NOT NULL,
+                    full_name VARCHAR(120) DEFAULT '',
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    email_verified BOOLEAN DEFAULT FALSE,
+                    email_verified_at TIMESTAMP,
+                    role VARCHAR(20) NOT NULL CHECK (role IN ('client', 'freelancer')),
+                    skills TEXT DEFAULT '',
+                    bio TEXT DEFAULT '',
+                    rating DOUBLE PRECISION DEFAULT 0.0,
+                    total_reviews INTEGER DEFAULT 0,
+                    balance DOUBLE PRECISION DEFAULT 1000.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    client_id INTEGER NOT NULL REFERENCES users(id),
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    skills_required TEXT NOT NULL,
+                    budget DOUBLE PRECISION NOT NULL,
+                    deadline TEXT NOT NULL,
+                    status VARCHAR(30) DEFAULT 'open',
+                    fraud_score INTEGER DEFAULT 0,
+                    fraud_level VARCHAR(20) DEFAULT 'Low',
+                    fraud_reasons TEXT DEFAULT '[]',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS proposals (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    freelancer_id INTEGER NOT NULL REFERENCES users(id),
+                    cover_letter TEXT NOT NULL,
+                    bid_amount DOUBLE PRECISION NOT NULL,
+                    timeline TEXT NOT NULL,
+                    status VARCHAR(30) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(job_id, freelancer_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS escrow (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    client_id INTEGER NOT NULL REFERENCES users(id),
+                    freelancer_id INTEGER REFERENCES users(id),
+                    amount DOUBLE PRECISION NOT NULL,
+                    status VARCHAR(30) DEFAULT 'held',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    released_at TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    message TEXT NOT NULL,
+                    type VARCHAR(30) DEFAULT 'info',
+                    is_read INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS work_submissions (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    freelancer_id INTEGER NOT NULL REFERENCES users(id),
+                    escrow_id INTEGER REFERENCES escrow(id),
+                    delivery_message TEXT NOT NULL,
+                    delivery_url TEXT DEFAULT '',
+                    upload_archive_name TEXT DEFAULT '',
+                    upload_archive_path TEXT DEFAULT '',
+                    status VARCHAR(30) DEFAULT 'submitted',
+                    client_feedback TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS complaints (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    job_id INTEGER NOT NULL REFERENCES jobs(id),
+                    escrow_id INTEGER REFERENCES escrow(id),
+                    submission_id INTEGER REFERENCES work_submissions(id),
+                    complainant_id INTEGER REFERENCES users(id),
+                    against_user_id INTEGER REFERENCES users(id),
+                    message TEXT NOT NULL,
+                    status VARCHAR(40) DEFAULT 'open',
+                    admin_notes TEXT DEFAULT '',
+                    resolution_action TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS email_codes (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    email VARCHAR(255) NOT NULL,
+                    purpose VARCHAR(50) NOT NULL,
+                    code VARCHAR(6) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    consumed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(120) DEFAULT ''"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMP"))
+        conn.execute(text("ALTER TABLE work_submissions ADD COLUMN IF NOT EXISTS upload_archive_name TEXT DEFAULT ''"))
+        conn.execute(text("ALTER TABLE work_submissions ADD COLUMN IF NOT EXISTS upload_archive_path TEXT DEFAULT ''"))
+
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_client ON jobs(client_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_proposals_job ON proposals(job_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_proposals_fl ON proposals(freelancer_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_work_submissions_job ON work_submissions(job_id, created_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_complaints_status ON complaints(status, created_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_notifs_user ON notifications(user_id, is_read)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, created_at DESC)"))
+
 
 # ══════════════════════════════════════════════════════════════
 #  AI ENGINE — EscrowIQ Intelligence Module
-#  Three AI features as specified in the project proposal:
-#    1. Fraud Detection   — analyzes job postings for risk signals
-#    2. Smart Matching    — weighted skill + rating scoring
-#    3. Proposal Generator — context-aware cover letter builder
+#  1. Fraud Detection   — analyzes job postings for risk signals
+#  2. Smart Matching    — weighted skill + rating + experience scoring
+#  3. Proposal Generator — context-aware cover letter builder
 # ══════════════════════════════════════════════════════════════
 
-# ── FEATURE 1: FRAUD DETECTION ──────────────────────────────
-# Each rule: (regex_pattern, risk_weight, category, description)
 FRAUD_RULES = [
-    # Payment & financial red flags (highest weight)
-    (r'\b(bitcoin|crypto|cryptocurrency|ethereum|usdt)\b',      5, "💰 Payment",    "Cryptocurrency payment method requested"),
-    (r'\b(western union|wire transfer|money order|zelle)\b',    4, "💰 Payment",    "Untraceable payment method mentioned"),
-    (r'\b(bank account|routing number|ssn|social security)\b',  5, "🔐 Personal",   "Sensitive financial information requested"),
-    # Urgency & pressure tactics
-    (r'\b(urgent|asap|immediately|right now|today only)\b',     2, "⚡ Urgency",    "Artificial urgency / pressure language"),
-    (r'\b(limited time|expires soon|act now|last chance)\b',    2, "⚡ Urgency",    "Scarcity manipulation tactics"),
-    # Unrealistic promises
-    (r'\b(guaranteed|100%|risk.?free|no experience needed)\b',  2, "🎭 False Claims","Unrealistic or misleading guarantees"),
-    (r'\b(get rich|easy money|passive income|make money fast)\b',3,"🎭 False Claims","Get-rich-quick language detected"),
-    (r'\b(double your|triple your|10x your)\b',                 3, "🎭 False Claims","Unrealistic financial multiplier claims"),
-    # Suspicious links / external redirection
-    (r'\b(click here|visit link|go to|external site|dm me)\b',  3, "🔗 External",   "Suspicious redirection away from platform"),
-    (r'https?://(?!escrow)',                                     2, "🔗 External",   "External URL embedded in posting"),
-    # Spam / low-effort signals
-    (r'(.)\1{4,}',                                              1, "📊 Quality",    "Repetitive characters (spam pattern)"),
-    (r'[A-Z]{8,}',                                              1, "📊 Quality",    "Excessive use of capital letters"),
-    # Vague or deceptive scope
-    (r'\b(simple task|easy job|just need|only takes)\b',        1, "📝 Scope",      "Vague or minimised job scope"),
-    (r'\b(no contract|no nda|trust me|informal)\b',             2, "📝 Scope",      "Attempts to bypass formal agreements"),
+    (r"\b(bitcoin|crypto|cryptocurrency|ethereum|usdt)\b", 5, "Payment", "Cryptocurrency payment method requested"),
+    (r"\b(western union|wire transfer|money order|zelle)\b", 4, "Payment", "Untraceable payment method mentioned"),
+    (r"\b(bank account|routing number|ssn|social security)\b", 5, "Personal", "Sensitive financial information requested"),
+    (r"\b(urgent|asap|immediately|right now|today only)\b", 2, "Urgency", "Artificial urgency or pressure language"),
+    (r"\b(limited time|expires soon|act now|last chance)\b", 2, "Urgency", "Scarcity manipulation tactics"),
+    (r"\b(guaranteed|100%|risk.?free|no experience needed)\b", 2, "False Claims", "Unrealistic or misleading guarantees"),
+    (r"\b(get rich|easy money|passive income|make money fast)\b", 3, "False Claims", "Get-rich-quick language detected"),
+    (r"\b(double your|triple your|10x your)\b", 3, "False Claims", "Unrealistic financial multiplier claims"),
+    (r"\b(click here|visit link|go to|external site|dm me)\b", 3, "External", "Suspicious redirection away from platform"),
+    (r"https?://(?!escrow)", 2, "External", "External URL embedded in posting"),
+    (r"(.)\1{4,}", 1, "Quality", "Repetitive characters suggest spam"),
+    (r"[A-Z]{8,}", 1, "Quality", "Excessive use of capital letters"),
+    (r"\b(simple task|easy job|just need|only takes)\b", 1, "Scope", "Vague or minimized job scope"),
+    (r"\b(no contract|no nda|trust me|informal)\b", 2, "Scope", "Attempts to bypass formal agreements"),
 ]
 
-def analyze_fraud(title, description):
-    """
-    Analyzes a job posting for fraud indicators.
-    Returns: (score 0-10, level str, detailed_reasons list, category_breakdown dict)
-    """
-    text       = (title + ' ' + description).lower()
-    raw_score  = 0
-    reasons    = []
+
+def analyze_fraud_rules(title, description):
+    raw_text = f"{title} {description}"
+    text_blob = raw_text.lower()
+    raw_score = 0
+    reasons = []
     categories = {}
 
     for pattern, weight, category, reason in FRAUD_RULES:
-        if re.search(pattern, text, re.IGNORECASE):
+        target = raw_text if pattern == r"[A-Z]{8,}" else text_blob
+        if re.search(pattern, target):
             raw_score += weight
-            reasons.append({'flag': reason, 'category': category, 'weight': weight})
+            reasons.append({"flag": reason, "category": category, "weight": weight, "source": "rules"})
             categories[category] = categories.get(category, 0) + weight
 
-    # Content quality checks
-    word_count = len(description.split())
+    word_count = len((description or "").split())
     if word_count < 15:
         raw_score += 3
-        reasons.append({'flag': 'Extremely short description (under 15 words)', 'category': '📊 Quality', 'weight': 3})
+        reasons.append({"flag": "Extremely short description (under 15 words)", "category": "Quality", "weight": 3, "source": "rules"})
     elif word_count < 30:
         raw_score += 1
-        reasons.append({'flag': 'Short description — limited job detail provided', 'category': '📊 Quality', 'weight': 1})
+        reasons.append({"flag": "Short description with limited job detail", "category": "Quality", "weight": 1, "source": "rules"})
 
-    # Title quality check
-    if len(title.split()) < 3:
+    if len((title or "").split()) < 3:
         raw_score += 1
-        reasons.append({'flag': 'Very short job title', 'category': '📊 Quality', 'weight': 1})
+        reasons.append({"flag": "Very short job title", "category": "Quality", "weight": 1, "source": "rules"})
 
-    # Normalise score to 0-10
     score = min(raw_score, 10)
-    if score <= 2:
-        level = "Low"
-    elif score <= 5:
-        level = "Medium"
-    else:
-        level = "High"
+    return {
+        "score": score,
+        "label": fraud_level_from_score(score),
+        "reasons": reasons,
+        "categories": categories,
+    }
 
-    return score, level, reasons, categories
+
+def analyze_fraud_details(title, description):
+    rule_result = analyze_fraud_rules(title, description)
+    mode = fraud_ai_mode()
+
+    if mode == "rules":
+        return {
+            "score": rule_result["score"],
+            "label": rule_result["label"],
+            "reasons": rule_result["reasons"],
+            "categories": rule_result["categories"],
+            "components": {
+                "rule_score": rule_result["score"],
+                "ai_score": None,
+                "final_score": rule_result["score"],
+                "ai_confidence": 0,
+                "fraud_similarity": 0,
+                "legit_similarity": 0,
+                "mode": "rules",
+                "fallback_used": False,
+            },
+        }
+
+    try:
+        ai_result = analyze_fraud_ai(title, description)
+        final_score = round(0.4 * rule_result["score"] + 0.6 * ai_result["score"])
+        final_label = fraud_level_from_score(final_score)
+        combined_reasons = rule_result["reasons"] + ai_result["reasons"]
+        categories = dict(rule_result["categories"])
+        if ai_result["reasons"]:
+            categories["AI Similarity"] = ai_result["score"]
+
+        if mode == "model":
+            final_score = ai_result["score"]
+            final_label = ai_result["label"]
+            combined_reasons = ai_result["reasons"] or rule_result["reasons"]
+
+        return {
+            "score": final_score,
+            "label": final_label,
+            "reasons": combined_reasons,
+            "categories": categories,
+            "components": {
+                "rule_score": rule_result["score"],
+                "ai_score": ai_result["score"],
+                "final_score": final_score,
+                "ai_confidence": ai_result.get("confidence", 0),
+                "fraud_similarity": ai_result.get("fraud_similarity", 0),
+                "legit_similarity": ai_result.get("legit_similarity", 0),
+                "ai_model": ai_result.get("model"),
+                "mode": mode,
+                "fallback_used": False,
+            },
+        }
+    except Exception:
+        if not fraud_fallback_enabled():
+            raise
+        return {
+            "score": rule_result["score"],
+            "label": rule_result["label"],
+            "reasons": rule_result["reasons"],
+            "categories": rule_result["categories"],
+            "components": {
+                "rule_score": rule_result["score"],
+                "ai_score": None,
+                "final_score": rule_result["score"],
+                "ai_confidence": 0,
+                "fraud_similarity": 0,
+                "legit_similarity": 0,
+                "mode": mode,
+                "fallback_used": True,
+            },
+        }
+
+
+def analyze_fraud(title, description):
+    analysis = analyze_fraud_details(title, description)
+    return analysis["score"], analysis["label"], analysis["reasons"], analysis["categories"]
+
 
 # ── FEATURE 2: SMART MATCHING ────────────────────────────────
 # Skill synonym map — partial matching for common tech aliases
@@ -227,34 +531,41 @@ SKILL_SYNONYMS = {
     'api':          'rest api',
 }
 
+
 def normalise_skill(skill):
     s = skill.strip().lower()
     return SKILL_SYNONYMS.get(s, s)
 
+
+def parse_skills(skills_str):
+    return {normalise_skill(s) for s in (skills_str or "").split(",") if s.strip()}
+
+
 def match_freelancers(job_skills_str, all_freelancers):
     """
     Weighted matching algorithm:
-      - Skill match score: % of job skills covered (with synonym expansion)
-      - Rating boost: +10% for each star above 3.0
+      - Skill match score: % of job skills covered (with synonym expansion + partial matching)
+      - Rating boost: normalised 0-100 from 5-star scale
       - Experience boost: log-scaled from review count
-      - Final composite score = 0.65 * skill_match + 0.25 * rating_norm + 0.10 * exp_norm
+      - Final composite = 0.65 * skill_match + 0.25 * rating_norm + 0.10 * exp_norm
     Returns top 5 with full scoring breakdown.
     """
-    job_skills = {normalise_skill(s) for s in job_skills_str.split(',') if s.strip()}
+    import math
+    job_skills = {normalise_skill(s) for s in job_skills_str.split(",") if s.strip()}
     if not job_skills:
         return []
 
     results = []
     for fl in all_freelancers:
-        raw_fl_skills = [s for s in (fl.get('skills') or '').split(',') if s.strip()]
+        raw_fl_skills = [s for s in (fl.get("skills") or "").split(",") if s.strip()]
         if not raw_fl_skills:
             continue
         fl_skills = {normalise_skill(s) for s in raw_fl_skills}
 
         # Direct + synonym-expanded skill overlap
-        matched   = job_skills & fl_skills
+        matched = job_skills & fl_skills
         # Also check partial substring matches for tech stacks
-        partial   = set()
+        partial = set()
         for js in job_skills:
             for fs in fl_skills:
                 if js in fs or fs in js:
@@ -266,44 +577,162 @@ def match_freelancers(job_skills_str, all_freelancers):
 
         skill_pct   = round(len(matched) / max(len(job_skills), 1) * 100)
 
-        # Rating component: normalised 0-100, baseline at 3.0 stars
-        rating      = float(fl.get('rating') or 0)
+        # Rating component: normalised 0-100
+        rating      = float(fl.get("rating") or 0)
         rating_norm = max(0, min(100, (rating / 5.0) * 100))
 
         # Experience component: logarithmic scale (0 reviews = 0, 50 reviews ≈ 100)
-        reviews     = int(fl.get('total_reviews') or 0)
-        import math
+        reviews     = int(fl.get("total_reviews") or 0)
         exp_norm    = min(100, math.log1p(reviews) / math.log1p(50) * 100)
 
         # Composite weighted score
         composite   = round(0.65 * skill_pct + 0.25 * rating_norm + 0.10 * exp_norm)
 
         results.append({
-            'id':             fl['id'],
-            'username':       fl['username'],
-            'skills':         fl['skills'],
-            'rating':         rating,
-            'total_reviews':  reviews,
-            'bio':            fl['bio'] or '',
-            'matched_skills': sorted(list(matched)),
-            'partial_matches':sorted(list(partial)),
-            'missing_skills': sorted(list(job_skills - matched)),
-            'skill_pct':      skill_pct,
-            'rating_norm':    round(rating_norm),
-            'exp_norm':       round(exp_norm),
-            'composite':      composite,
-            # Keep match_pct as alias for backward compat
-            'match_pct':      composite,
+            "id":              fl["id"],
+            "username":        fl["username"],
+            "full_name":       fl.get("full_name") or fl["username"],
+            "skills":          fl["skills"],
+            "rating":          rating,
+            "total_reviews":   reviews,
+            "bio":             fl.get("bio") or "",
+            "matched_skills":  sorted(list(matched)),
+            "partial_matches": sorted(list(partial)),
+            "missing_skills":  sorted(list(job_skills - matched)),
+            "skill_pct":       skill_pct,
+            "rating_norm":     round(rating_norm),
+            "exp_norm":        round(exp_norm),
+            "composite":       composite,
+            "match_pct":       composite,  # alias for backward compat
         })
 
-    results.sort(key=lambda x: (-x['composite'], -x['rating']))
+    results.sort(key=lambda x: (-x["composite"], -x["rating"]))
     return results[:5]
+
+
+def hybrid_match_freelancers(job, all_freelancers, limit=5):
+    """
+    Hybrid client-side matching:
+      final = 0.55 * semantic + 0.25 * skill_overlap + 0.15 * rating + 0.05 * experience
+    Keeps the existing rule-based matcher and blends it with the ML semantic score.
+    """
+    heuristic_matches = match_freelancers(job.get("skills_required") or "", all_freelancers)
+    heuristic_by_id = {item["id"]: dict(item) for item in heuristic_matches}
+
+    try:
+        semantic_matches = ml_match_freelancers(dict(job), [dict(f) for f in all_freelancers])
+    except Exception:
+        semantic_matches = []
+    semantic_by_id = {item["id"]: dict(item) for item in semantic_matches}
+
+    merged = []
+    for freelancer in all_freelancers:
+        freelancer_id = freelancer["id"]
+        heuristic = heuristic_by_id.get(freelancer_id, {})
+        semantic = semantic_by_id.get(freelancer_id, {})
+
+        semantic_score = int(semantic.get("ml_score") or 0)
+        skill_overlap = int(heuristic.get("skill_pct") or 0)
+        rating_norm = int(heuristic.get("rating_norm") or round(max(0, min(100, (float(freelancer.get("rating") or 0) / 5.0) * 100))))
+        exp_norm = int(heuristic.get("exp_norm") or 0)
+        final_score = round(
+            0.55 * semantic_score +
+            0.25 * skill_overlap +
+            0.15 * rating_norm +
+            0.05 * exp_norm
+        )
+
+        matched_skills = heuristic.get("matched_skills")
+        if matched_skills is None:
+            job_skills = parse_skills(job.get("skills_required") or "")
+            freelancer_skills = parse_skills(freelancer.get("skills") or "")
+            matched_skills = sorted(job_skills & freelancer_skills)
+
+        partial_matches = heuristic.get("partial_matches", [])
+        missing_skills = heuristic.get("missing_skills")
+        if missing_skills is None:
+            job_skills = parse_skills(job.get("skills_required") or "")
+            missing_skills = sorted(job_skills - set(matched_skills))
+
+        if final_score <= 0:
+            continue
+
+        rationale = []
+        if semantic_score:
+            rationale.append(f"semantic {semantic_score}%")
+        if skill_overlap:
+            rationale.append(f"skill overlap {skill_overlap}%")
+        if matched_skills:
+            rationale.append("matched " + ", ".join(matched_skills[:3]))
+
+        merged.append({
+            "id": freelancer_id,
+            "username": freelancer["username"],
+            "full_name": freelancer.get("full_name") or freelancer["username"],
+            "skills": freelancer.get("skills") or "",
+            "bio": freelancer.get("bio") or "",
+            "rating": float(freelancer.get("rating") or 0),
+            "total_reviews": int(freelancer.get("total_reviews") or 0),
+            "semantic_score": semantic_score,
+            "skill_pct": skill_overlap,
+            "rating_norm": rating_norm,
+            "exp_norm": exp_norm,
+            "matched_skills": matched_skills,
+            "partial_matches": partial_matches,
+            "missing_skills": missing_skills,
+            "heuristic_score": int(heuristic.get("composite") or 0),
+            "ml_score": semantic_score,
+            "hybrid_score": final_score,
+            "match_pct": final_score,
+            "rationale": rationale,
+        })
+
+    merged.sort(key=lambda item: (-item["hybrid_score"], -item["semantic_score"], -item["rating"]))
+    return merged[:limit]
+
+
+def match_jobs_for_freelancer(all_jobs, freelancer):
+    freelancer_skills = parse_skills(freelancer.get("skills") or "")
+    if not freelancer_skills and not (freelancer.get("bio") or "").strip():
+        return []
+
+    matched_jobs = []
+    for job in all_jobs:
+        job_skills = parse_skills(job.get("skills_required") or "")
+        common = sorted(freelancer_skills & job_skills)
+        skill_overlap = round(len(common) / len(job_skills) * 100) if job_skills else 0
+
+        try:
+            semantic_matches = ml_match_freelancers(dict(job), [dict(freelancer)])
+            semantic_score = int(semantic_matches[0]["ml_score"]) if semantic_matches else 0
+        except Exception:
+            semantic_score = 0
+
+        hybrid_score = round(0.65 * semantic_score + 0.35 * skill_overlap)
+        if hybrid_score <= 0:
+            continue
+
+        enriched = dict(job)
+        enriched["matched_skills"] = common
+        enriched["skill_pct"] = skill_overlap
+        enriched["semantic_score"] = semantic_score
+        enriched["hybrid_score"] = hybrid_score
+        enriched["match_pct"] = hybrid_score
+        enriched["rationale"] = [
+            f"semantic {semantic_score}%",
+            f"skill overlap {skill_overlap}%",
+        ]
+        matched_jobs.append(enriched)
+
+    matched_jobs.sort(key=lambda item: (-item["hybrid_score"], item["fraud_score"], -item["budget"]))
+    return matched_jobs
+
 
 # ── FEATURE 3: PROPOSAL GENERATOR ────────────────────────────
 PROPOSAL_TEMPLATES = [
     {
-        'style': 'Professional',
-        'text': """Dear Hiring Manager,
+        "style": "Professional",
+        "text": """Dear Hiring Manager,
 
 I am writing to express my strong interest in the "{title}" project. Having reviewed your requirements thoroughly, I am confident that my expertise in {fl_skills} makes me an excellent candidate for this role.
 
@@ -311,7 +740,7 @@ Your project requires {skills} — areas where I have hands-on professional expe
 
 What you can expect from me:
 - Clear communication and regular progress updates
-- Clean, well-documented code and deliverables  
+- Clean, well-documented code and deliverables
 - On-time delivery within the agreed timeline
 - Post-delivery support for any revisions
 
@@ -323,8 +752,8 @@ Best regards,
 {name}""",
     },
     {
-        'style': 'Direct',
-        'text': """Hello,
+        "style": "Direct",
+        "text": """Hello,
 
 Your "{title}" project is exactly the type of work I specialise in. My background in {fl_skills} gives me the foundation needed to deliver this effectively.
 
@@ -337,8 +766,8 @@ Ready to start. Let us talk.
 {name}""",
     },
     {
-        'style': 'Detailed',
-        'text': """Dear Client,
+        "style": "Detailed",
+        "text": """Dear Client,
 
 Thank you for posting this opportunity. After carefully reading through the "{title}" project details, I would like to submit my proposal.
 
@@ -363,682 +792,2008 @@ Warm regards,
     },
 ]
 
-def generate_proposal(job_title, job_description, job_skills, freelancer_name, freelancer_skills, style='random'):
+
+def generate_proposal(job_title, job_description, job_skills, freelancer_name, freelancer_skills, style="random"):
     """
     Generates a professional, context-aware proposal cover letter.
     style: 'random', 'Professional', 'Direct', or 'Detailed'
     Returns: (proposal_text, style_used)
     """
-    if style == 'random' or style not in [t['style'] for t in PROPOSAL_TEMPLATES]:
+    if style == "random" or style not in [t["style"] for t in PROPOSAL_TEMPLATES]:
         chosen = random.choice(PROPOSAL_TEMPLATES)
     else:
-        chosen = next(t for t in PROPOSAL_TEMPLATES if t['style'] == style)
+        chosen = next(t for t in PROPOSAL_TEMPLATES if t["style"] == style)
 
-    skill_list = ', '.join(s.strip() for s in job_skills.split(',')[:4] if s.strip()) \
-                 or 'the required technologies'
-    fl_list    = ', '.join(s.strip() for s in freelancer_skills.split(',')[:4] if s.strip()) \
-                 or 'relevant technologies'
+    skill_list = ", ".join(s.strip() for s in job_skills.split(",")[:4] if s.strip()) or "the required technologies"
+    fl_list    = ", ".join(s.strip() for s in freelancer_skills.split(",")[:4] if s.strip()) or "relevant technologies"
     words      = job_description.split()
-    summary    = ' '.join(words[:20]) + ('...' if len(words) > 20 else '')
+    summary    = " ".join(words[:20]) + ("..." if len(words) > 20 else "")
 
-    text = chosen['text'].format(
-        title    = job_title,
-        skills   = skill_list,
-        fl_skills= fl_list,
-        summary  = summary,
-        name     = freelancer_name,
+    text = chosen["text"].format(
+        title=job_title,
+        skills=skill_list,
+        fl_skills=fl_list,
+        summary=summary,
+        name=freelancer_name,
     )
-    return text, chosen['style']
+    return text, chosen["style"]
 
-# ──────────────────────────────────────────────
-# AUTH HELPERS
-# ──────────────────────────────────────────────
+
 def current_user():
-    uid = session.get('user_id')
-    if uid:
-        return query_db("SELECT * FROM users WHERE id=?", [uid], one=True)
+    if is_admin_session():
+        email = session.get("admin_email") or admin_email()
+        return {
+            "id": None,
+            "username": "admin",
+            "full_name": "Admin",
+            "email": email,
+            "role": "admin",
+            "email_verified": True,
+        }
+    user_id = session.get("user_id")
+    if user_id:
+        return query_db("SELECT * FROM users WHERE id=?", [user_id], one=True)
     return None
 
-def login_required(f):
-    from functools import wraps
-    @wraps(f)
+
+def login_required(func):
+    @wraps(func)
     def wrapper(*args, **kwargs):
-        if not session.get('user_id'):
-            if request.path.startswith('/api/'):
-                return jsonify({'error': 'Authentication required'}), 401
-            return redirect(url_for('login_page'))
-        return f(*args, **kwargs)
+        if not session.get("user_id") and not is_admin_session():
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({"error": "Authentication required"}), 401
+            return redirect(url_for("login_page"))
+        return func(*args, **kwargs)
+
     return wrapper
 
-def notify(user_id, message, ntype='info'):
-    mutate_db("INSERT INTO notifications (user_id, message, type) VALUES (?,?,?)",
-              [user_id, message, ntype])
 
-# ──────────────────────────────────────────────
-# ERROR HANDLERS  (FIX #3 — were missing entirely)
-# ──────────────────────────────────────────────
-@app.errorhandler(404)
-def not_found(e):
-    if request.path.startswith('/api/'):
-        return jsonify({'error': 'Endpoint not found'}), 404
+def admin_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not is_admin_session():
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({"error": "Admin access required"}), 403
+            return redirect(url_for("dashboard"))
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def notify(user_id, message, notification_type="info"):
+    """Insert a notification row. Silently swallows errors so it never crashes a caller."""
     try:
-        return render_template('404.html', user=current_user()), 404
+        mutate_db(
+            "INSERT INTO notifications (user_id, message, type) VALUES (?, ?, ?) RETURNING id",
+            [user_id, message, notification_type],
+        )
     except Exception:
-        return "<h1>404 — Page Not Found</h1><a href='/'>Go home</a>", 404
+        pass
 
-@app.errorhandler(500)
-def server_error(e):
-    if request.path.startswith('/api/'):
-        return jsonify({'error': 'Internal server error'}), 500
+
+def user_contact(user_id):
+    return query_db(
+        "SELECT id, username, full_name, email FROM users WHERE id=?",
+        [user_id],
+        one=True,
+    )
+
+
+def notify_and_email(user_id, message, notification_type="info", email_subject=None, email_body=None):
+    notify(user_id, message, notification_type)
+    if not email_subject or not email_body:
+        return
+
+    recipient = user_contact(user_id)
+    if not recipient or not recipient.get("email"):
+        return
+
     try:
-        return render_template('500.html', user=current_user()), 500
+        deliver_email(recipient["email"], email_subject, email_body)
     except Exception:
-        return "<h1>500 — Server Error</h1><a href='/'>Go home</a>", 500
+        pass
 
-@app.errorhandler(405)
-def method_not_allowed(e):
-    return jsonify({'error': 'Method not allowed'}), 405
 
-# ──────────────────────────────────────────────
-# PAGE ROUTES
-# ──────────────────────────────────────────────
-@app.route('/')
+def email_admin(subject, body):
+    recipient = admin_email()
+    if not recipient:
+        return
+    try:
+        deliver_email(recipient, subject, body)
+    except Exception:
+        pass
+
+
+def email_founders(subject, body):
+    for recipient in founder_alert_emails():
+        try:
+            deliver_email(recipient, subject, body)
+        except Exception:
+            pass
+
+
+def allowed_upload_name(filename):
+    if not filename:
+        return False
+    lowered = filename.lower()
+    return lowered.endswith(".zip") or "." in lowered
+
+
+def save_submission_archive(job_id, freelancer_id, uploaded_zip=None, uploaded_files=None, relative_paths=None):
+    os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
+    token = secrets.token_hex(8)
+    archive_name = f"job_{job_id}_freelancer_{freelancer_id}_{token}.zip"
+    archive_path = os.path.join(SUBMISSIONS_DIR, archive_name)
+
+    if uploaded_zip is not None:
+        uploaded_zip.save(archive_path)
+        display_name = secure_filename(uploaded_zip.filename) or archive_name
+        return display_name, archive_name
+
+    uploaded_files = uploaded_files or []
+    relative_paths = relative_paths or []
+    if not uploaded_files:
+        return "", ""
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, uploaded in enumerate(uploaded_files):
+            if not uploaded or not uploaded.filename:
+                continue
+            rel_path = relative_paths[index] if index < len(relative_paths) else uploaded.filename
+            rel_path = rel_path.replace("\\", "/").strip().lstrip("/")
+            rel_path = "/".join(part for part in rel_path.split("/") if part not in ("", ".", ".."))
+            if not rel_path:
+                rel_path = secure_filename(uploaded.filename)
+            archive.writestr(rel_path, uploaded.read())
+
+    return f"job_{job_id}_submission_folder.zip", archive_name
+
+
+def get_json_safe():
+    try:
+        return request.get_json(force=True) or {}
+    except Exception:
+        return {}
+
+
+def csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(16)
+        session["csrf_token"] = token
+    return token
+
+
+def format_date(value):
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%b %d, %Y")
+    text_value = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text_value, fmt).strftime("%b %d, %Y")
+        except ValueError:
+            continue
+    return text_value
+
+
+def iso_datetime(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text_value = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text_value, fmt).isoformat()
+        except ValueError:
+            continue
+    return text_value.replace(" ", "T")
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+app.jinja_env.globals["format_date"] = format_date
+
+
+@app.before_request
+def enforce_csrf():
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        csrf_token()
+        return None
+    if not request.path.startswith("/api/"):
+        return None
+    expected = session.get("csrf_token")
+    provided = request.headers.get("X-CSRF-Token", "")
+    if not expected or provided != expected:
+        return jsonify({"error": "Invalid CSRF token"}), 403
+    return None
+
+
+def smtp_settings():
+    host = os.environ.get("SMTP_HOST", "").strip()
+    username = os.environ.get("SMTP_USERNAME", "").strip()
+    password = os.environ.get("SMTP_PASSWORD", "").strip()
+    from_email = os.environ.get("SMTP_FROM_EMAIL", "").strip()
+    port_raw = os.environ.get("SMTP_PORT", "587").strip() or "587"
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise RuntimeError("SMTP_PORT must be an integer.") from exc
+    return {
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "from_email": from_email,
+        "use_tls": os.environ.get("SMTP_USE_TLS", "true").lower() == "true",
+    }
+
+
+def ensure_mail_configured():
+    if app.config.get("TESTING"):
+        return None
+    settings = smtp_settings()
+    required = ("host", "port", "username", "password", "from_email")
+    missing = [key for key in required if not settings.get(key)]
+    if missing:
+        raise RuntimeError(
+            "Email delivery is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM_EMAIL."
+        )
+    return settings
+
+
+def deliver_email(recipient, subject, text_body):
+    if app.config.get("TESTING"):
+        return
+    settings = ensure_mail_configured()
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings["from_email"]
+    message["To"] = recipient
+    message.set_content(text_body)
+
+    if settings["use_tls"]:
+        with smtplib.SMTP(settings["host"], settings["port"], timeout=20) as smtp:
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.login(settings["username"], settings["password"])
+            smtp.send_message(message)
+        return
+
+    with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=20, context=ssl.create_default_context()) as smtp:
+        smtp.login(settings["username"], settings["password"])
+        smtp.send_message(message)
+
+
+def generate_email_code():
+    return f"{random.randint(0, 999999):06d}"
+
+
+def store_email_code(email, purpose, code, ttl_minutes=15, user_id=None):
+    expires_at = datetime.utcnow() + timedelta(minutes=ttl_minutes)
+    if user_id is None:
+        user = query_db("SELECT id FROM users WHERE email=?", [email], one=True)
+        if not user:
+            raise ValueError("Cannot create an email code for a missing user.")
+        user_id = user["id"]
+    mutate_db("DELETE FROM email_codes WHERE email=? AND purpose=? AND consumed_at IS NULL", [email, purpose])
+    mutate_db(
+        "INSERT INTO email_codes (user_id, email, purpose, code, expires_at) VALUES (?, ?, ?, ?, ?)",
+        [user_id, email, purpose, code, expires_at],
+    )
+
+
+def latest_email_code(email, purpose):
+    return query_db(
+        """
+        SELECT *
+        FROM email_codes
+        WHERE email=? AND purpose=? AND consumed_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        [email, purpose],
+        one=True,
+    )
+
+
+def consume_email_code(email, purpose, code):
+    row = latest_email_code(email, purpose)
+    if not row:
+        return False, "Code not found. Request a new one."
+    expires_at = row["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00").replace(" ", "T"))
+    if expires_at < datetime.utcnow():
+        mutate_db(
+            "UPDATE email_codes SET consumed_at=CURRENT_TIMESTAMP WHERE email=? AND purpose=? AND consumed_at IS NULL",
+            [email, purpose],
+        )
+        return False, "Code expired. Request a new one."
+    if row["code"] != code:
+        return False, "Invalid code."
+    mutate_db("UPDATE email_codes SET consumed_at=CURRENT_TIMESTAMP WHERE id=?", [row["id"]])
+    return True, None
+
+
+def send_email_code(email, purpose, user_id=None):
+    code = generate_email_code()
+    store_email_code(email, purpose, code, user_id=user_id)
+
+    if purpose == "verify_email":
+        subject = "EscrowIQ email verification code"
+        text_body = (
+            "Your EscrowIQ verification code is "
+            f"{code}. It expires in 15 minutes.\n\n"
+            "If you did not create this account, you can ignore this email."
+        )
+    else:
+        subject = "EscrowIQ password reset code"
+        text_body = (
+            "Your EscrowIQ password reset code is "
+            f"{code}. It expires in 15 minutes.\n\n"
+            "If you did not request a password reset, you can ignore this email."
+        )
+
+    deliver_email(email, subject, text_body)
+    return code
+
+
+@app.route("/")
 def index():
-    # FIX #4: index route computes its own stats — no missing variables
-    total_jobs   = query_db("SELECT COUNT(*) AS c FROM jobs", one=True)['c']
-    total_users  = query_db("SELECT COUNT(*) AS c FROM users", one=True)['c']
-    open_jobs_count = query_db("SELECT COUNT(*) AS c FROM jobs WHERE status='open'", one=True)['c']
-    open_jobs = query_db("""
-        SELECT j.id, j.title, j.budget, j.deadline, j.fraud_level, u.username AS client_name
-        FROM jobs j
-        JOIN users u ON u.id = j.client_id
-        WHERE j.status = 'open'
-        ORDER BY j.created_at DESC, j.id DESC
-        LIMIT 4
-    """)
+    total_jobs = query_db("SELECT COUNT(*) AS c FROM jobs", one=True)["c"]
+    total_users = query_db("SELECT COUNT(*) AS c FROM users", one=True)["c"]
     total_escrow = query_db(
-        "SELECT COALESCE(SUM(amount),0) AS s FROM escrow WHERE status='held'", one=True)['s']
-    return render_template('index.html', user=current_user(),
-                           total_jobs=total_jobs, total_users=total_users,
-                           open_jobs=open_jobs, open_jobs_count=open_jobs_count,
-                           total_escrow=total_escrow)
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM escrow WHERE status='released'",
+        one=True,
+    )["s"]
+    open_jobs = query_db(
+        """
+        SELECT j.*, COALESCE(u.full_name, u.username) AS client_name
+        FROM jobs j
+        JOIN users u ON j.client_id=u.id
+        WHERE j.status='open'
+        ORDER BY j.created_at DESC
+        LIMIT 4
+        """
+    )
+    return render_template(
+        "index.html",
+        user=current_user(),
+        total_jobs=total_jobs,
+        total_users=total_users,
+        total_escrow=total_escrow,
+        open_jobs=open_jobs,
+    )
 
-@app.route('/register')
+
+@app.route("/register")
 def register_page():
-    if session.get('user_id'):
-        return redirect(url_for('dashboard'))
-    return render_template('register.html')
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return render_template("register.html")
 
-@app.route('/login')
+
+@app.route("/login")
 def login_page():
-    if session.get('user_id'):
-        return redirect(url_for('dashboard'))
-    return render_template('login.html')
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return render_template("login.html")
 
-@app.route('/dashboard')
+
+@app.route("/verify-email")
+def verify_email_page():
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return render_template("verify_email.html", preset_email=request.args.get("email", "").strip().lower())
+
+
+@app.route("/forgot-password")
+def forgot_password_page():
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return render_template("forgot_password.html", preset_email=request.args.get("email", "").strip().lower())
+
+
+@app.route("/dashboard")
 @login_required
 def dashboard():
     user = current_user()
-    if user['role'] == 'client':
+    if user["role"] == "admin":
+        return redirect(url_for("admin_complaints_page"))
+    if user["role"] == "client":
         jobs = query_db(
-            "SELECT * FROM jobs WHERE client_id=? ORDER BY created_at DESC", [user['id']])
-        return render_template('dashboard_client.html', user=user, jobs=jobs)
-    else:
-        jobs = query_db("""
-            SELECT j.*, u.username AS client_name
-            FROM   jobs j JOIN users u ON j.client_id = u.id
-            WHERE  j.status = 'open'
-            ORDER  BY j.created_at DESC
-        """)
-        my_proposals = query_db("""
-            SELECT p.*, j.title AS job_title, j.budget AS job_budget,
-                   u.username AS client_name
-            FROM   proposals p
-            JOIN   jobs  j ON p.job_id    = j.id
-            JOIN   users u ON j.client_id = u.id
-            WHERE  p.freelancer_id = ?
-            ORDER  BY p.created_at DESC
-        """, [user['id']])
-        return render_template('dashboard_freelancer.html', user=user,
-                               jobs=jobs, my_proposals=my_proposals)
+            """
+            SELECT j.*, (SELECT COUNT(*) FROM proposals WHERE job_id=j.id) AS proposal_count
+            FROM jobs j
+            WHERE j.client_id=?
+            ORDER BY j.created_at DESC
+            """,
+            [user["id"]],
+        )
+        return render_template("dashboard_client.html", user=user, jobs=jobs)
 
-@app.route('/jobs')
+    jobs = query_db(
+        """
+        SELECT j.*, COALESCE(u.full_name, u.username) AS client_name,
+               (SELECT COUNT(*) FROM proposals WHERE job_id=j.id) AS proposal_count
+        FROM jobs j
+        JOIN users u ON j.client_id=u.id
+        WHERE j.status='open'
+        ORDER BY j.created_at DESC
+        """
+    )
+    jobs = match_jobs_for_freelancer(jobs, user)
+    my_proposals = query_db(
+        """
+        SELECT p.*, j.title AS job_title, j.budget AS job_budget,
+               j.status AS job_status, COALESCE(u.full_name, u.username) AS client_name
+        FROM proposals p
+        JOIN jobs j ON p.job_id=j.id
+        JOIN users u ON j.client_id=u.id
+        WHERE p.freelancer_id=?
+        ORDER BY p.created_at DESC
+        """,
+        [user["id"]],
+    )
+    return render_template("dashboard_freelancer.html", user=user, jobs=jobs, my_proposals=my_proposals)
+
+
+@app.route("/jobs")
 @login_required
 def jobs_page():
     user = current_user()
-    jobs = query_db("""
-        SELECT j.*, u.username AS client_name
-        FROM   jobs j JOIN users u ON j.client_id = u.id
-        WHERE  j.status = 'open'
-        ORDER  BY j.created_at DESC
-    """)
-    return render_template('jobs.html', user=user, jobs=jobs)
+    if user["role"] == "admin":
+        return redirect(url_for("admin_complaints_page"))
+    jobs = query_db(
+        """
+        SELECT j.*, COALESCE(u.full_name, u.username) AS client_name,
+               (SELECT COUNT(*) FROM proposals WHERE job_id=j.id) AS proposal_count
+        FROM jobs j
+        JOIN users u ON j.client_id=u.id
+        WHERE j.status='open'
+        ORDER BY j.created_at DESC
+        """
+    )
+    if user["role"] == "freelancer":
+        jobs = match_jobs_for_freelancer(jobs, user)
+    return render_template("jobs.html", user=user, jobs=jobs)
 
-@app.route('/jobs/<int:job_id>')
+
+@app.route("/jobs/<int:job_id>")
 @login_required
 def job_detail(job_id):
     user = current_user()
-    job  = query_db("""
-        SELECT j.*, u.username AS client_name, u.rating AS client_rating
-        FROM   jobs j JOIN users u ON j.client_id = u.id
-        WHERE  j.id = ?
-    """, [job_id], one=True)
+    if user["role"] == "admin":
+        return redirect(url_for("admin_complaints_page"))
+    job = query_db(
+        """
+        SELECT j.*, COALESCE(u.full_name, u.username) AS client_name, u.rating AS client_rating,
+               u.total_reviews AS client_reviews,
+               (SELECT COUNT(*) FROM proposals WHERE job_id=j.id) AS proposal_count
+        FROM jobs j
+        JOIN users u ON j.client_id=u.id
+        WHERE j.id=?
+        """,
+        [job_id],
+        one=True,
+    )
     if not job:
-        return redirect(url_for('jobs_page'))
+        return redirect(url_for("jobs_page"))
 
-    proposals     = []
-    escrow_info   = None
+    proposals = []
+    escrow_info = None
+    matched = []
     user_proposal = None
-    matched       = []
+    latest_submission = query_db(
+        """
+        SELECT ws.*, COALESCE(u.full_name, u.username) AS freelancer_name
+        FROM work_submissions ws
+        JOIN users u ON ws.freelancer_id=u.id
+        WHERE ws.job_id=?
+        ORDER BY ws.created_at DESC, ws.id DESC
+        LIMIT 1
+        """,
+        [job_id],
+        one=True,
+    )
+    open_complaints = query_db(
+        """
+        SELECT c.*, COALESCE(u.full_name, u.username) AS complainant_name
+        FROM complaints c
+        LEFT JOIN users u ON c.complainant_id=u.id
+        WHERE c.job_id=? AND c.status='open'
+        ORDER BY c.created_at DESC, c.id DESC
+        """,
+        [job_id],
+    )
 
-    if user['role'] == 'client' and job['client_id'] == user['id']:
-        proposals = query_db("""
-            SELECT p.*, u.username AS freelancer_name, u.skills AS freelancer_skills,
-                   u.rating AS freelancer_rating, u.total_reviews, u.id AS freelancer_id
-            FROM   proposals p JOIN users u ON p.freelancer_id = u.id
-            WHERE  p.job_id = ?
-            ORDER  BY p.created_at DESC
-        """, [job_id])
-        escrow_info = query_db("SELECT * FROM escrow WHERE job_id=?", [job_id], one=True)
+    escrow_info = query_db("SELECT * FROM escrow WHERE job_id=? ORDER BY created_at DESC LIMIT 1", [job_id], one=True)
+
+    if user["role"] == "client" and job["client_id"] == user["id"]:
+        proposals = query_db(
+            """
+            SELECT p.*, COALESCE(u.full_name, u.username) AS freelancer_name, u.skills AS freelancer_skills,
+                   u.rating AS freelancer_rating, u.total_reviews, u.bio AS freelancer_bio
+            FROM proposals p
+            JOIN users u ON p.freelancer_id=u.id
+            WHERE p.job_id=?
+            ORDER BY p.bid_amount ASC
+            """,
+            [job_id],
+        )
         freelancers = query_db("SELECT * FROM users WHERE role='freelancer'")
-        matched     = match_freelancers(job['skills_required'], [dict(f) for f in freelancers])
+        matched = hybrid_match_freelancers(job, freelancers)
 
-    if user['role'] == 'freelancer':
+    if user["role"] == "freelancer":
         user_proposal = query_db(
             "SELECT * FROM proposals WHERE job_id=? AND freelancer_id=?",
-            [job_id, user['id']], one=True)
+            [job_id, user["id"]],
+            one=True,
+        )
 
-    # FIX #5: guard NULL / malformed fraud_reasons
-    try:
-        fraud_reasons = json.loads(job['fraud_reasons'] or '[]')
-    except (json.JSONDecodeError, TypeError):
-        fraud_reasons = []
+    fraud_reasons = json.loads(job["fraud_reasons"] or "[]")
+    return render_template(
+        "job_detail.html",
+        user=user,
+        job=job,
+        proposals=proposals,
+        escrow_info=escrow_info,
+        user_proposal=user_proposal,
+        matched=matched,
+        fraud_reasons=fraud_reasons,
+        latest_submission=latest_submission,
+        open_complaints=open_complaints,
+    )
 
-    return render_template('job_detail.html', user=user, job=job,
-                           proposals=proposals, escrow_info=escrow_info,
-                           user_proposal=user_proposal, matched=matched,
-                           fraud_reasons=fraud_reasons)
 
-@app.route('/profile')
+@app.route("/profile")
 @login_required
 def profile_page():
-    return render_template('profile.html', user=current_user())
+    user = current_user()
+    if user["role"] == "admin":
+        return redirect(url_for("admin_complaints_page"))
+    extra = {}
+    if user["role"] == "client":
+        extra["recent_jobs"] = query_db(
+            """
+            SELECT j.*, (SELECT COUNT(*) FROM proposals WHERE job_id=j.id) AS proposal_count
+            FROM jobs j
+            WHERE j.client_id=?
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+            [user["id"]],
+        )
+    else:
+        extra["recent_proposals"] = query_db(
+            """
+            SELECT p.*, j.title AS job_title, j.budget AS job_budget
+            FROM proposals p
+            JOIN jobs j ON p.job_id=j.id
+            WHERE p.freelancer_id=?
+            ORDER BY p.created_at DESC
+            LIMIT 5
+            """,
+            [user["id"]],
+        )
+    return render_template("profile.html", user=user, **extra)
 
-@app.route('/escrow')
+
+@app.route("/escrow")
 @login_required
 def escrow_page():
     user = current_user()
-    if user['role'] == 'client':
-        escrows = query_db("""
-            SELECT e.*, j.title AS job_title, u.username AS freelancer_name
-            FROM   escrow e
-            JOIN   jobs  j ON e.job_id       = j.id
-            LEFT JOIN users u ON e.freelancer_id = u.id
-            WHERE  e.client_id = ?
-            ORDER  BY e.created_at DESC
-        """, [user['id']])
+    if user["role"] == "admin":
+        return redirect(url_for("admin_complaints_page"))
+    if user["role"] == "client":
+        escrows = query_db(
+            """
+            SELECT e.*, j.title AS job_title, COALESCE(u.full_name, u.username) AS freelancer_name
+            FROM escrow e
+            JOIN jobs j ON e.job_id=j.id
+            LEFT JOIN users u ON e.freelancer_id=u.id
+            WHERE e.client_id=?
+            ORDER BY e.created_at DESC
+            """,
+            [user["id"]],
+        )
     else:
-        escrows = query_db("""
-            SELECT e.*, j.title AS job_title, u.username AS client_name
-            FROM   escrow e
-            JOIN   jobs  j ON e.job_id    = j.id
-            JOIN   users u ON e.client_id = u.id
-            WHERE  e.freelancer_id = ?
-            ORDER  BY e.created_at DESC
-        """, [user['id']])
-    return render_template('escrow.html', user=user, escrows=escrows)
+        escrows = query_db(
+            """
+            SELECT e.*, j.title AS job_title, COALESCE(u.full_name, u.username) AS client_name
+            FROM escrow e
+            JOIN jobs j ON e.job_id=j.id
+            JOIN users u ON e.client_id=u.id
+            WHERE e.freelancer_id=?
+            ORDER BY e.created_at DESC
+            """,
+            [user["id"]],
+        )
+    return render_template("escrow.html", user=user, escrows=escrows)
 
-# ──────────────────────────────────────────────
-# API — AUTH
-# ──────────────────────────────────────────────
-@app.route('/api/register', methods=['POST'])
+
+@app.route("/admin/complaints")
+@login_required
+@admin_required
+def admin_complaints_page():
+    complaints = query_db(
+        """
+        SELECT c.*,
+               j.title AS job_title,
+               j.description AS job_description,
+               j.skills_required,
+               ws.delivery_message,
+               ws.delivery_url,
+               ws.upload_archive_path,
+               ws.client_feedback,
+               COALESCE(cp.full_name, cp.username, 'Unknown') AS complainant_name,
+               COALESCE(ag.full_name, ag.username, 'Unknown') AS against_name
+        FROM complaints c
+        JOIN jobs j ON c.job_id=j.id
+        LEFT JOIN work_submissions ws ON c.submission_id=ws.id
+        LEFT JOIN users cp ON c.complainant_id=cp.id
+        LEFT JOIN users ag ON c.against_user_id=ag.id
+        ORDER BY
+            CASE WHEN c.status='open' THEN 0 ELSE 1 END,
+            c.created_at DESC,
+            c.id DESC
+        """
+    )
+    return render_template("admin_complaints.html", user=current_user(), complaints=complaints)
+
+
+@app.route("/submissions/<int:submission_id>/download")
+@login_required
+def download_submission_archive(submission_id):
+    submission = query_db(
+        """
+        SELECT ws.*, j.client_id, e.freelancer_id
+        FROM work_submissions ws
+        JOIN jobs j ON ws.job_id=j.id
+        LEFT JOIN escrow e ON ws.escrow_id=e.id
+        WHERE ws.id=?
+        """,
+        [submission_id],
+        one=True,
+    )
+    if not submission or not submission.get("upload_archive_path"):
+        return redirect(url_for("dashboard"))
+
+    user = current_user()
+    if user["role"] != "admin":
+        user_id = user.get("id")
+        allowed = user_id in {submission["client_id"], submission["freelancer_id"], submission["freelancer_id"]}
+        if not allowed:
+            return redirect(url_for("dashboard"))
+
+    archive_path = os.path.join(SUBMISSIONS_DIR, submission["upload_archive_path"])
+    if not os.path.exists(archive_path):
+        return redirect(url_for("dashboard"))
+
+    return send_file(
+        archive_path,
+        as_attachment=True,
+        download_name=submission.get("upload_archive_name") or os.path.basename(archive_path),
+    )
+
+
+@app.route("/api/register", methods=["POST"])
 def api_register():
-    d        = request.get_json(silent=True) or {}
-    username = d.get('username', '').strip()
-    email    = d.get('email',    '').strip().lower()
-    password = d.get('password', '')
-    role     = d.get('role',     '')
-    skills   = d.get('skills',   '').strip()
-    bio      = d.get('bio',      '').strip()
+    data = get_json_safe()
+    username = data.get("username", "").strip()
+    full_name = data.get("full_name", "").strip()
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+    role = data.get("role", "")
+    skills = data.get("skills", "").strip()
+    bio = data.get("bio", "").strip()
 
     if not all([username, email, password, role]):
-        return jsonify({'error': 'All fields are required'}), 400
-    if role not in ('client', 'freelancer'):
-        return jsonify({'error': 'Invalid role selected'}), 400
+        return jsonify({"error": "All fields are required"}), 400
+    if role not in ("client", "freelancer"):
+        return jsonify({"error": "Invalid role"}), 400
+    if len(username) < 3 or len(username) > 30:
+        return jsonify({"error": "Username must be 3-30 characters"}), 400
+    if not re.match(r"^[a-zA-Z0-9_]+$", username):
+        return jsonify({"error": "Username: letters, numbers, underscores only"}), 400
+    if full_name and len(full_name) > 120:
+        return jsonify({"error": "Full name must be 120 characters or fewer"}), 400
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        return jsonify({"error": "Please enter a valid email address"}), 400
     if len(password) < 6:
-        return jsonify({'error': 'Password must be at least 6 characters'}), 400
-    if len(username) < 3:
-        return jsonify({'error': 'Username must be at least 3 characters'}), 400
-    if '@' not in email or '.' not in email.split('@')[-1]:
-        return jsonify({'error': 'Enter a valid email address'}), 400
-
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
     if query_db("SELECT id FROM users WHERE username=?", [username], one=True):
-        return jsonify({'error': 'Username already taken'}), 409
+        return jsonify({"error": "Username already taken"}), 409
     if query_db("SELECT id FROM users WHERE email=?", [email], one=True):
-        return jsonify({'error': 'Email already registered'}), 409
+        return jsonify({"error": "Email already registered"}), 409
 
     hashed = generate_password_hash(password)
-    uid    = mutate_db(
-        "INSERT INTO users (username,email,password,role,skills,bio) VALUES (?,?,?,?,?,?)",
-        [username, email, hashed, role, skills, bio])
-    notify(uid, f"Welcome to FreeLancer Pro, {username}! Your account is ready.", 'success')
-    return jsonify({'message': 'Account created successfully', 'redirect': '/login'}), 201
+    insert_user_sql = """
+        INSERT INTO users (username, full_name, email, password, email_verified, role, skills, bio)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    if is_postgres():
+        insert_user_sql += " RETURNING id"
 
-@app.route('/api/login', methods=['POST'])
+    user_id = mutate_db(
+        insert_user_sql,
+        [username, full_name, email, hashed, False, role, skills, bio],
+    )
+    try:
+        send_email_code(email, "verify_email")
+    except RuntimeError as exc:
+        mutate_db("DELETE FROM users WHERE id=?", [user_id])
+        return jsonify({"error": str(exc)}), 503
+    except Exception:
+        mutate_db("DELETE FROM users WHERE id=?", [user_id])
+        return jsonify({"error": "Unable to send verification email right now. Please try again later."}), 502
+
+    notify(user_id, f"Welcome to EscrowIQ, {full_name or username}. Verify your email to activate the account.", "info")
+    return jsonify({"message": "Account created. Check your inbox for the verification code.", "redirect": f"/verify-email?email={email}"}), 201
+
+
+@app.route("/api/login", methods=["POST"])
 def api_login():
-    d        = request.get_json(silent=True) or {}
-    email    = d.get('email',    '').strip().lower()
-    password = d.get('password', '')
-    if not email or not password:
-        return jsonify({'error': 'Email and password are required'}), 400
-    user = query_db("SELECT * FROM users WHERE email=?", [email], one=True)
-    if not user or not check_password_hash(user['password'], password):
-        return jsonify({'error': 'Invalid email or password'}), 401
-    session['user_id'] = user['id']
-    return jsonify({'message': 'Login successful',
-                    'redirect': '/dashboard',
-                    'role':     user['role']}), 200
+    data = get_json_safe()
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
 
-@app.route('/api/logout', methods=['POST'])
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    if admin_email() and email == admin_email() and password == admin_password():
+        session.clear()
+        session["is_admin"] = True
+        session["admin_email"] = email
+        session["username"] = "admin"
+        session["full_name"] = "Admin"
+        csrf_token()
+        email_founders(
+            "EscrowIQ admin login detected",
+            (
+                "An admin login was detected on EscrowIQ.\n\n"
+                f"Admin email: {email}\n"
+                f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                f"IP: {request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')}\n"
+                f"User-Agent: {request.headers.get('User-Agent', 'unknown')}"
+            ),
+        )
+        return (
+            jsonify(
+                {
+                    "message": "Admin login successful",
+                    "redirect": "/admin/complaints",
+                    "role": "admin",
+                    "username": "admin",
+                }
+            ),
+            200,
+        )
+
+    user = query_db("SELECT * FROM users WHERE email=?", [email], one=True)
+    if not user or not check_password_hash(user["password"], password):
+        return jsonify({"error": "Invalid email or password"}), 401
+    if not user.get("email_verified"):
+        return (
+            jsonify(
+                {
+                    "error": "Email verification required",
+                    "verification_required": True,
+                    "redirect": f"/verify-email?email={email}",
+                }
+            ),
+            403,
+        )
+
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["full_name"] = user.get("full_name") or user["username"]
+    return (
+        jsonify(
+            {
+                "message": "Login successful",
+                "redirect": "/dashboard",
+                "role": user["role"],
+                "username": user["username"],
+            }
+        ),
+        200,
+    )
+
+
+@app.route("/api/logout", methods=["POST"])
 def api_logout():
     session.clear()
-    return jsonify({'redirect': '/'}), 200
+    return jsonify({"redirect": "/"}), 200
 
-# ──────────────────────────────────────────────
-# API — JOBS
-# ──────────────────────────────────────────────
-@app.route('/api/jobs', methods=['POST'])
+
+@app.route("/api/auth/verify-email", methods=["POST"])
+def api_verify_email():
+    data = get_json_safe()
+    email = data.get("email", "").strip().lower()
+    code = data.get("code", "").strip()
+
+    if not email or not code:
+        return jsonify({"error": "Email and code are required"}), 400
+
+    user = query_db("SELECT id, username, full_name, email_verified FROM users WHERE email=?", [email], one=True)
+    if not user:
+        return jsonify({"error": "Account not found"}), 404
+    if user.get("email_verified"):
+        return jsonify({"message": "Email already verified.", "redirect": "/login"}), 200
+
+    ok, error = consume_email_code(email, "verify_email", code)
+    if not ok:
+        return jsonify({"error": error}), 400
+
+    mutate_db(
+        "UPDATE users SET email_verified=TRUE, email_verified_at=CURRENT_TIMESTAMP WHERE email=?",
+        [email],
+    )
+    notify(user["id"], f"Email verified for {user.get('full_name') or user['username']}. Your account is active.", "success")
+    return jsonify({"message": "Email verified successfully.", "redirect": "/login"}), 200
+
+
+@app.route("/api/auth/resend-verification", methods=["POST"])
+def api_resend_verification():
+    data = get_json_safe()
+    email = data.get("email", "").strip().lower()
+
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+
+    user = query_db("SELECT id, email_verified FROM users WHERE email=?", [email], one=True)
+    if not user:
+        return jsonify({"error": "Account not found"}), 404
+    if user.get("email_verified"):
+        return jsonify({"message": "Email already verified."}), 200
+
+    try:
+        send_email_code(email, "verify_email")
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except Exception:
+        return jsonify({"error": "Unable to send verification email right now. Please try again later."}), 502
+    return jsonify({"message": "Verification code sent to your email."}), 200
+
+
+@app.route("/api/auth/request-password-reset", methods=["POST"])
+def api_request_password_reset():
+    data = get_json_safe()
+    email = data.get("email", "").strip().lower()
+
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+
+    user = query_db("SELECT id FROM users WHERE email=?", [email], one=True)
+    if not user:
+        return jsonify({"message": "If that email exists, a reset code has been sent."}), 200
+
+    try:
+        send_email_code(email, "reset_password")
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except Exception:
+        return jsonify({"error": "Unable to send password reset email right now. Please try again later."}), 502
+    return jsonify({"message": "Reset code sent to your email."}), 200
+
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def api_reset_password():
+    data = get_json_safe()
+    email = data.get("email", "").strip().lower()
+    code = data.get("code", "").strip()
+    password = data.get("password", "")
+
+    if not email or not code or not password:
+        return jsonify({"error": "Email, code, and password are required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    user = query_db("SELECT id FROM users WHERE email=?", [email], one=True)
+    if not user:
+        return jsonify({"error": "Account not found"}), 404
+
+    ok, error = consume_email_code(email, "reset_password", code)
+    if not ok:
+        return jsonify({"error": error}), 400
+
+    mutate_db("UPDATE users SET password=? WHERE email=?", [generate_password_hash(password), email])
+    notify(user["id"], "Your password was updated successfully.", "success")
+    return jsonify({"message": "Password updated successfully.", "redirect": "/login"}), 200
+
+
+@app.route("/api/jobs", methods=["POST"])
 @login_required
 def api_post_job():
     user = current_user()
-    if user['role'] != 'client':
-        return jsonify({'error': 'Only clients can post jobs'}), 403
+    if user["role"] != "client":
+        return jsonify({"error": "Only clients can post jobs"}), 403
 
-    d           = request.get_json(silent=True) or {}
-    title       = d.get('title',           '').strip()
-    description = d.get('description',     '').strip()
-    skills      = d.get('skills_required', '').strip()
-    deadline    = d.get('deadline',        '').strip()
+    data = get_json_safe()
+    title = data.get("title", "").strip()
+    description = data.get("description", "").strip()
+    skills = data.get("skills_required", "").strip()
+    budget = data.get("budget")
+    deadline = data.get("deadline", "").strip()
+
+    if not all([title, description, skills, budget, deadline]):
+        return jsonify({"error": "All fields are required"}), 400
+    if len(title) < 5:
+        return jsonify({"error": "Job title must be at least 5 characters"}), 400
 
     try:
-        budget = float(d.get('budget', 0))
+        budget = float(budget)
         if budget <= 0:
             raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({'error': 'Budget must be a positive number'}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "Budget must be a positive number"}), 400
 
-    if not all([title, description, skills, deadline]):
-        return jsonify({'error': 'All fields are required'}), 400
+    try:
+        parsed_deadline = datetime.strptime(deadline, "%Y-%m-%d")
+        if parsed_deadline.date() <= datetime.today().date():
+            return jsonify({"error": "Deadline must be a future date"}), 400
+    except ValueError:
+        return jsonify({"error": "Invalid deadline format (YYYY-MM-DD)"}), 400
 
-    fraud_score, fraud_level, fraud_reasons, fraud_cats = analyze_fraud(title, description)
-    fraud_flags = [r['flag'] for r in fraud_reasons]
-    jid = mutate_db("""
-        INSERT INTO jobs
-            (client_id,title,description,skills_required,budget,deadline,
-             fraud_score,fraud_level,fraud_reasons)
-        VALUES (?,?,?,?,?,?,?,?,?)
-    """, [user['id'], title, description, skills, budget, deadline,
-          fraud_score, fraud_level, json.dumps(fraud_flags)])
+    fraud_analysis = analyze_fraud_details(title, description)
+    fraud_score = fraud_analysis["score"]
+    fraud_level = fraud_analysis["label"]
+    fraud_reasons = fraud_analysis["reasons"]
 
-    if fraud_level == 'High':
-        notify(user['id'],
-               f"Your job '{title}' was flagged HIGH risk. Consider revising the description.",
-               'warning')
-    return jsonify({'message': 'Job posted successfully', 'job_id': jid,
-                    'fraud_level': fraud_level, 'fraud_score': fraud_score,
-                    'fraud_reasons': fraud_flags,
-                    'fraud_details': fraud_reasons}), 201
+    insert_job_sql = """
+        INSERT INTO jobs (client_id, title, description, skills_required, budget, deadline, fraud_score, fraud_level, fraud_reasons)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    if is_postgres():
+        insert_job_sql += " RETURNING id"
 
-@app.route('/api/jobs/<int:job_id>', methods=['DELETE'])
+    job_id = mutate_db(
+        insert_job_sql,
+        [
+            user["id"],
+            title,
+            description,
+            skills,
+            budget,
+            deadline,
+            fraud_score,
+            fraud_level,
+            json.dumps(fraud_reasons),
+        ],
+    )
+
+    if fraud_level == "High":
+        notify(user["id"], f"Job '{title}' was flagged as high risk. Consider revising it.", "warning")
+
+    return (
+        jsonify(
+            {
+                "message": "Job posted successfully",
+                "job_id": job_id,
+                "fraud_level": fraud_level,
+                "fraud_score": fraud_score,
+                "fraud_reasons": fraud_reasons,
+                "fraud_components": fraud_analysis["components"],
+            }
+        ),
+        201,
+    )
+
+
+@app.route("/api/jobs/<int:job_id>", methods=["DELETE"])
 @login_required
 def api_delete_job(job_id):
     user = current_user()
-    job  = query_db("SELECT * FROM jobs WHERE id=?", [job_id], one=True)
+    job = query_db("SELECT * FROM jobs WHERE id=?", [job_id], one=True)
     if not job:
-        return jsonify({'error': 'Job not found'}), 404
-    if job['client_id'] != user['id']:
-        return jsonify({'error': 'Not authorised'}), 403
-    mutate_db("DELETE FROM jobs WHERE id=?", [job_id])
-    return jsonify({'message': 'Job deleted'}), 200
+        return jsonify({"error": "Job not found"}), 404
+    if job["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
 
-# ──────────────────────────────────────────────
-# API — PROPOSALS
-# ──────────────────────────────────────────────
-@app.route('/api/proposals', methods=['POST'])
+    mutate_db("DELETE FROM proposals WHERE job_id=?", [job_id])
+    mutate_db("DELETE FROM jobs WHERE id=?", [job_id])
+    return jsonify({"message": "Job deleted"}), 200
+
+
+@app.route("/api/proposals", methods=["POST"])
 @login_required
 def api_submit_proposal():
     user = current_user()
-    if user['role'] != 'freelancer':
-        return jsonify({'error': 'Only freelancers can submit proposals'}), 403
+    if user["role"] != "freelancer":
+        return jsonify({"error": "Only freelancers can submit proposals"}), 403
 
-    d            = request.get_json(silent=True) or {}
-    job_id       = d.get('job_id')
-    cover_letter = d.get('cover_letter', '').strip()
-    timeline     = d.get('timeline',     '').strip()
+    data = get_json_safe()
+    job_id = data.get("job_id")
+    cover_letter = data.get("cover_letter", "").strip()
+    bid_amount = data.get("bid_amount")
+    timeline = data.get("timeline", "").strip()
+
+    if not all([job_id, cover_letter, bid_amount, timeline]):
+        return jsonify({"error": "All fields are required"}), 400
+    if len(cover_letter) < 50:
+        return jsonify({"error": "Cover letter must be at least 50 characters"}), 400
 
     try:
-        bid_amount = float(d.get('bid_amount', 0))
+        bid_amount = float(bid_amount)
         if bid_amount <= 0:
             raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({'error': 'Bid amount must be a positive number'}), 400
-
-    if not all([job_id, cover_letter, timeline]):
-        return jsonify({'error': 'All fields are required'}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "Bid must be a positive number"}), 400
 
     job = query_db("SELECT * FROM jobs WHERE id=? AND status='open'", [job_id], one=True)
     if not job:
-        return jsonify({'error': 'Job not found or no longer accepting proposals'}), 404
+        return jsonify({"error": "Job not found or no longer accepting proposals"}), 404
+    if job["client_id"] == user["id"]:
+        return jsonify({"error": "You cannot apply to your own job"}), 403
+    if query_db("SELECT id FROM proposals WHERE job_id=? AND freelancer_id=?", [job_id, user["id"]], one=True):
+        return jsonify({"error": "You have already applied to this job"}), 409
 
-    if query_db("SELECT id FROM proposals WHERE job_id=? AND freelancer_id=?",
-                [job_id, user['id']], one=True):
-        return jsonify({'error': 'You have already applied to this job'}), 409
+    insert_proposal_sql = """
+        INSERT INTO proposals (job_id, freelancer_id, cover_letter, bid_amount, timeline)
+        VALUES (?, ?, ?, ?, ?)
+    """
+    if is_postgres():
+        insert_proposal_sql += " RETURNING id"
 
-    pid = mutate_db(
-        "INSERT INTO proposals (job_id,freelancer_id,cover_letter,bid_amount,timeline) VALUES (?,?,?,?,?)",
-        [job_id, user['id'], cover_letter, bid_amount, timeline])
-    notify(job['client_id'],
-           f"New proposal from {user['username']} for '{job['title']}'", 'info')
-    return jsonify({'message': 'Proposal submitted successfully', 'proposal_id': pid}), 201
+    try:
+        proposal_id = mutate_db(
+            insert_proposal_sql,
+            [job_id, user["id"], cover_letter, bid_amount, timeline],
+        )
+    except IntegrityError:
+        return jsonify({"error": "You have already applied to this job"}), 409
+    notify_and_email(
+        job["client_id"],
+        f"New proposal from {user.get('full_name') or user['username']} for '{job['title']}'",
+        "info",
+        email_subject=f"New proposal for {job['title']}",
+        email_body=(
+            f"{user.get('full_name') or user['username']} submitted a proposal for your job '{job['title']}'.\n\n"
+            f"Bid amount: ${bid_amount:.2f}\n"
+            f"Timeline: {timeline}\n\n"
+            "Open EscrowIQ to review the application."
+        ),
+    )
+    return jsonify({"message": "Proposal submitted successfully", "proposal_id": proposal_id}), 201
 
-@app.route('/api/proposals/<int:proposal_id>/accept', methods=['POST'])
+
+@app.route("/api/proposals/<int:proposal_id>/accept", methods=["POST"])
 @login_required
 def api_accept_proposal(proposal_id):
-    user     = current_user()
-    proposal = query_db("""
+    user = current_user()
+    proposal = query_db(
+        """
         SELECT p.*, j.title AS job_title, j.client_id
-        FROM   proposals p JOIN jobs j ON p.job_id = j.id
-        WHERE  p.id = ?
-    """, [proposal_id], one=True)
+        FROM proposals p
+        JOIN jobs j ON p.job_id=j.id
+        WHERE p.id=?
+        """,
+        [proposal_id],
+        one=True,
+    )
     if not proposal:
-        return jsonify({'error': 'Proposal not found'}), 404
-    if proposal['client_id'] != user['id']:
-        return jsonify({'error': 'Not authorised'}), 403
-    mutate_db("UPDATE proposals SET status='accepted' WHERE id=?", [proposal_id])
-    mutate_db("UPDATE proposals SET status='rejected' WHERE job_id=? AND id!=?",
-              [proposal['job_id'], proposal_id])
-    mutate_db("UPDATE jobs SET status='in_progress' WHERE id=?", [proposal['job_id']])
-    notify(proposal['freelancer_id'],
-           f"Your proposal for '{proposal['job_title']}' was accepted!", 'success')
-    return jsonify({'message': 'Proposal accepted'}), 200
+        return jsonify({"error": "Proposal not found"}), 404
+    if proposal["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if proposal["status"] != "pending":
+        return jsonify({"error": "Proposal is no longer pending"}), 400
 
-@app.route('/api/proposals/<int:proposal_id>/reject', methods=['POST'])
+    auto_rejected = query_db(
+        """
+        SELECT p.freelancer_id, COALESCE(u.full_name, u.username) AS freelancer_name
+        FROM proposals p
+        JOIN users u ON p.freelancer_id=u.id
+        WHERE p.job_id=? AND p.id!=? AND p.status='pending'
+        """,
+        [proposal["job_id"], proposal_id],
+    )
+
+    # Wrap all state changes in one transaction — if any write fails, all roll back
+    with get_engine().begin() as txn:
+        txn.execute(text(
+            "UPDATE proposals SET status='accepted' WHERE id=:pid"
+        ), {"pid": proposal_id})
+        txn.execute(text(
+            "UPDATE proposals SET status='rejected' WHERE job_id=:jid AND id!=:pid AND status='pending'"
+        ), {"jid": proposal["job_id"], "pid": proposal_id})
+        txn.execute(text(
+            "UPDATE jobs SET status='in_progress' WHERE id=:jid"
+        ), {"jid": proposal["job_id"]})
+
+    notify_and_email(
+        proposal["freelancer_id"],
+        f"Your proposal for '{proposal['job_title']}' was accepted.",
+        "success",
+        email_subject=f"Proposal accepted for {proposal['job_title']}",
+        email_body=(
+            f"Your proposal for '{proposal['job_title']}' was accepted.\n\n"
+            "The client can now fund escrow to start the project."
+        ),
+    )
+    for rejected in auto_rejected:
+        notify_and_email(
+            rejected["freelancer_id"],
+            f"Your proposal for '{proposal['job_title']}' was not selected.",
+            "info",
+            email_subject=f"Proposal update for {proposal['job_title']}",
+            email_body=(
+                f"Your proposal for '{proposal['job_title']}' was not selected this time.\n\n"
+                "You can keep applying to other opportunities in EscrowIQ."
+            ),
+        )
+    return jsonify({"message": "Proposal accepted"}), 200
+
+
+@app.route("/api/proposals/<int:proposal_id>/reject", methods=["POST"])
 @login_required
 def api_reject_proposal(proposal_id):
-    user     = current_user()
-    proposal = query_db("""
+    user = current_user()
+    proposal = query_db(
+        """
         SELECT p.*, j.client_id, j.title AS job_title
-        FROM   proposals p JOIN jobs j ON p.job_id = j.id
-        WHERE  p.id = ?
-    """, [proposal_id], one=True)
+        FROM proposals p
+        JOIN jobs j ON p.job_id=j.id
+        WHERE p.id=?
+        """,
+        [proposal_id],
+        one=True,
+    )
     if not proposal:
-        return jsonify({'error': 'Proposal not found'}), 404
-    if proposal['client_id'] != user['id']:
-        return jsonify({'error': 'Not authorised'}), 403
-    mutate_db("UPDATE proposals SET status='rejected' WHERE id=?", [proposal_id])
-    notify(proposal['freelancer_id'],
-           f"Your proposal for '{proposal['job_title']}' was not selected this time.", 'info')
-    return jsonify({'message': 'Proposal rejected'}), 200
+        return jsonify({"error": "Proposal not found"}), 404
+    if proposal["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if proposal["status"] != "pending":
+        return jsonify({"error": "Cannot reject a non-pending proposal"}), 400
 
-# ──────────────────────────────────────────────
-# API — ESCROW
-# ──────────────────────────────────────────────
-@app.route('/api/escrow/deposit', methods=['POST'])
+    mutate_db("UPDATE proposals SET status='rejected' WHERE id=?", [proposal_id])
+    notify_and_email(
+        proposal["freelancer_id"],
+        f"Your proposal for '{proposal['job_title']}' was not selected.",
+        "info",
+        email_subject=f"Proposal update for {proposal['job_title']}",
+        email_body=(
+            f"Your proposal for '{proposal['job_title']}' was not selected this time.\n\n"
+            "You can keep applying to other opportunities in EscrowIQ."
+        ),
+    )
+    return jsonify({"message": "Proposal rejected"}), 200
+
+
+@app.route("/api/escrow/deposit", methods=["POST"])
 @login_required
 def api_escrow_deposit():
     user = current_user()
-    if user['role'] != 'client':
-        return jsonify({'error': 'Only clients can deposit into escrow'}), 403
+    if user["role"] != "client":
+        return jsonify({"error": "Only clients can fund escrow"}), 403
 
-    d             = request.get_json(silent=True) or {}
-    job_id        = d.get('job_id')
-    freelancer_id = d.get('freelancer_id')
+    data = get_json_safe()
+    job_id = data.get("job_id")
+    amount = data.get("amount")
+    freelancer_id = data.get("freelancer_id")
+
+    if not job_id or not amount:
+        return jsonify({"error": "Job ID and amount are required"}), 400
 
     try:
-        amount = float(d.get('amount', 0))
+        amount = float(amount)
         if amount <= 0:
             raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({'error': 'Amount must be a positive number'}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "Amount must be a positive number"}), 400
 
-    job = query_db("SELECT * FROM jobs WHERE id=? AND client_id=?",
-                   [job_id, user['id']], one=True)
+    job = query_db("SELECT * FROM jobs WHERE id=? AND client_id=?", [job_id, user["id"]], one=True)
     if not job:
-        return jsonify({'error': 'Job not found or not yours'}), 404
-
+        return jsonify({"error": "Job not found"}), 404
     if query_db("SELECT id FROM escrow WHERE job_id=? AND status='held'", [job_id], one=True):
-        return jsonify({'error': 'An active escrow already exists for this job'}), 409
+        return jsonify({"error": "Active escrow already exists for this job"}), 409
+    accepted = query_db(
+        """
+        SELECT freelancer_id
+        FROM proposals
+        WHERE job_id=? AND status='accepted'
+        """,
+        [job_id],
+        one=True,
+    )
+    if not accepted:
+        return jsonify({"error": "Accept a proposal before funding escrow"}), 400
+    if not freelancer_id:
+        return jsonify({"error": "Accepted freelancer is required before funding escrow"}), 400
+    if accepted["freelancer_id"] != freelancer_id:
+        return jsonify({"error": "Escrow can only be funded for the accepted freelancer"}), 400
 
-    fresh = query_db("SELECT balance FROM users WHERE id=?", [user['id']], one=True)
-    if fresh['balance'] < amount:
-        return jsonify({'error': f"Insufficient balance. Available: ${fresh['balance']:.2f}"}), 400
+    fresh = query_db("SELECT balance FROM users WHERE id=?", [user["id"]], one=True)
+    if fresh["balance"] < amount:
+        return jsonify({"error": f"Insufficient balance (${fresh['balance']:.2f} available)"}), 400
 
-    mutate_db("UPDATE users SET balance = balance - ? WHERE id=?", [amount, user['id']])
-    eid = mutate_db(
-        "INSERT INTO escrow (job_id,client_id,freelancer_id,amount) VALUES (?,?,?,?)",
-        [job_id, user['id'], freelancer_id, amount])
+    # Atomic: deduct balance AND create escrow row together — no partial states
+    with get_engine().begin() as txn:
+        txn.execute(text(
+            "UPDATE users SET balance=balance-:amt WHERE id=:uid"
+        ), {"amt": amount, "uid": user["id"]})
+        result = txn.execute(text(
+            "INSERT INTO escrow (job_id, client_id, freelancer_id, amount) VALUES (:jid, :cid, :fid, :amt) RETURNING id"
+        ), {"jid": job_id, "cid": user["id"], "fid": freelancer_id, "amt": amount})
+        escrow_id = result.scalar()
 
+    notify_and_email(
+        user["id"],
+        f"You funded escrow with ${amount:.2f} for '{job['title']}'.",
+        "success",
+        email_subject=f"Escrow funded for {job['title']}",
+        email_body=(
+            f"You funded escrow for '{job['title']}' with ${amount:.2f}.\n\n"
+            "The funds are now held until you release or refund them."
+        ),
+    )
     if freelancer_id:
-        notify(freelancer_id,
-               f"${amount:.2f} has been placed in escrow for '{job['title']}'", 'success')
-    return jsonify({'message': f'${amount:.2f} deposited into escrow', 'escrow_id': eid}), 201
+        notify_and_email(
+            freelancer_id,
+            f"${amount:.2f} was locked in escrow for '{job['title']}'.",
+            "success",
+            email_subject=f"Escrow funded for {job['title']}",
+            email_body=(
+                f"The client funded escrow for '{job['title']}' with ${amount:.2f}.\n\n"
+                "You can begin work knowing the funds are secured."
+            ),
+        )
+    return jsonify({"message": f"${amount:.2f} secured in escrow", "escrow_id": escrow_id}), 201
 
-@app.route('/api/escrow/<int:escrow_id>/release', methods=['POST'])
+
+@app.route("/api/escrow/<int:escrow_id>/release", methods=["POST"])
 @login_required
 def api_escrow_release(escrow_id):
-    user   = current_user()
-    escrow = query_db("""
+    user = current_user()
+    escrow = query_db(
+        """
         SELECT e.*, j.title AS job_title
-        FROM   escrow e JOIN jobs j ON e.job_id = j.id
-        WHERE  e.id = ?
-    """, [escrow_id], one=True)
+        FROM escrow e
+        JOIN jobs j ON e.job_id=j.id
+        WHERE e.id=?
+        """,
+        [escrow_id],
+        one=True,
+    )
     if not escrow:
-        return jsonify({'error': 'Escrow not found'}), 404
-    if escrow['client_id'] != user['id']:
-        return jsonify({'error': 'Not authorised'}), 403
-    if escrow['status'] != 'held':
-        return jsonify({'error': 'Escrow is not in held status'}), 400
+        return jsonify({"error": "Escrow not found"}), 404
+    if escrow["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if escrow["status"] != "held":
+        return jsonify({"error": "Escrow is not in held status"}), 400
+    submission = query_db(
+        """
+        SELECT *
+        FROM work_submissions
+        WHERE job_id=? AND freelancer_id=?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        [escrow["job_id"], escrow["freelancer_id"]],
+        one=True,
+    )
+    if not submission or submission["status"] not in ("submitted", "disputed"):
+        return jsonify({"error": "The freelancer must submit work before payment can be released"}), 400
 
-    mutate_db("UPDATE escrow SET status='released', released_at=CURRENT_TIMESTAMP WHERE id=?",
-              [escrow_id])
-    if escrow['freelancer_id']:
-        mutate_db("UPDATE users SET balance = balance + ? WHERE id=?",
-                  [escrow['amount'], escrow['freelancer_id']])
-        notify(escrow['freelancer_id'],
-               f"${escrow['amount']:.2f} released to your account for '{escrow['job_title']}'!",
-               'success')
-    mutate_db("UPDATE jobs SET status='completed' WHERE id=?", [escrow['job_id']])
-    return jsonify({'message': f"${escrow['amount']:.2f} released to freelancer"}), 200
+    # Atomic: mark released + credit freelancer + complete job — all or nothing
+    with get_engine().begin() as txn:
+        txn.execute(text(
+            "UPDATE escrow SET status='released', released_at=CURRENT_TIMESTAMP WHERE id=:eid"
+        ), {"eid": escrow_id})
+        txn.execute(text(
+            "UPDATE work_submissions SET status='approved', reviewed_at=CURRENT_TIMESTAMP WHERE id=:sid"
+        ), {"sid": submission["id"]})
+        if escrow["freelancer_id"]:
+            txn.execute(text(
+                "UPDATE users SET balance=balance+:amt WHERE id=:fid"
+            ), {"amt": escrow["amount"], "fid": escrow["freelancer_id"]})
+        txn.execute(text(
+            "UPDATE jobs SET status='completed' WHERE id=:jid"
+        ), {"jid": escrow["job_id"]})
 
-@app.route('/api/escrow/<int:escrow_id>/refund', methods=['POST'])
+    notify_and_email(
+        user["id"],
+        f"You released ${escrow['amount']:.2f} for '{escrow['job_title']}'.",
+        "success",
+        email_subject=f"Payment released for {escrow['job_title']}",
+        email_body=(
+            f"You released ${escrow['amount']:.2f} from escrow for '{escrow['job_title']}'.\n\n"
+            "The project has been marked completed."
+        ),
+    )
+    if escrow["freelancer_id"]:
+        notify_and_email(
+            escrow["freelancer_id"],
+            f"${escrow['amount']:.2f} was released for '{escrow['job_title']}'.",
+            "success",
+            email_subject=f"Payment released for {escrow['job_title']}",
+            email_body=(
+                f"${escrow['amount']:.2f} was released to you for '{escrow['job_title']}'.\n\n"
+                "The funds have been added to your balance."
+            ),
+        )
+    return jsonify({"message": f"${escrow['amount']:.2f} released to freelancer"}), 200
+
+
+@app.route("/api/escrow/<int:escrow_id>/refund", methods=["POST"])
 @login_required
 def api_escrow_refund(escrow_id):
-    user   = current_user()
+    user = current_user()
     escrow = query_db("SELECT * FROM escrow WHERE id=?", [escrow_id], one=True)
     if not escrow:
-        return jsonify({'error': 'Escrow not found'}), 404
-    if escrow['client_id'] != user['id']:
-        return jsonify({'error': 'Not authorised'}), 403
-    if escrow['status'] != 'held':
-        return jsonify({'error': 'Escrow is not in held status'}), 400
+        return jsonify({"error": "Escrow not found"}), 404
+    if escrow["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if escrow["status"] != "held":
+        return jsonify({"error": "Escrow is not in held status"}), 400
+    submission = query_db(
+        """
+        SELECT id
+        FROM work_submissions
+        WHERE escrow_id=?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        [escrow_id],
+        one=True,
+    )
+    if submission:
+        return jsonify({"error": "Work has already been submitted. Please use the complaint flow so admin can review the case."}), 400
 
-    mutate_db("UPDATE escrow SET status='refunded', released_at=CURRENT_TIMESTAMP WHERE id=?",
-              [escrow_id])
-    mutate_db("UPDATE users SET balance = balance + ? WHERE id=?",
-              [escrow['amount'], user['id']])
-    return jsonify({'message': f"${escrow['amount']:.2f} refunded to your account"}), 200
+    with get_engine().begin() as txn:
+        txn.execute(text(
+            "UPDATE escrow SET status='refunded', released_at=CURRENT_TIMESTAMP WHERE id=:eid"
+        ), {"eid": escrow_id})
+        txn.execute(text(
+            "UPDATE users SET balance=balance+:amt WHERE id=:uid"
+        ), {"amt": escrow["amount"], "uid": user["id"]})
+        txn.execute(text(
+            "UPDATE jobs SET status='refunded' WHERE id=:jid"
+        ), {"jid": escrow["job_id"]})
 
-# ──────────────────────────────────────────────
-# PAGE ROUTE — AI FEATURES
-# ──────────────────────────────────────────────
-@app.route('/ai')
+    notify_and_email(
+        user["id"],
+        f"You refunded ${escrow['amount']:.2f} for job #{escrow['job_id']}.",
+        "warning",
+        email_subject="Escrow refunded",
+        email_body=(
+            f"You refunded ${escrow['amount']:.2f} from escrow for job #{escrow['job_id']}.\n\n"
+            "The amount has been returned to your balance."
+        ),
+    )
+    if escrow["freelancer_id"]:
+        notify_and_email(
+            escrow["freelancer_id"],
+            f"Escrow for job #{escrow['job_id']} was refunded by the client.",
+            "warning",
+            email_subject="Escrow refunded",
+            email_body=(
+                f"The client refunded escrow for job #{escrow['job_id']}.\n\n"
+                "No payment was released for this project."
+            ),
+        )
+    return jsonify({"message": f"${escrow['amount']:.2f} refunded to your balance"}), 200
+
+
+@app.route("/api/jobs/<int:job_id>/submit-work", methods=["POST"])
 @login_required
-def ai_page():
+def api_submit_work(job_id):
     user = current_user()
-    return render_template('ai_features.html', user=user,
-                           proposal_styles=[t['style'] for t in PROPOSAL_TEMPLATES])
+    if user["role"] != "freelancer":
+        return jsonify({"error": "Only freelancers can submit work"}), 403
 
-# ──────────────────────────────────────────────
-# API — AI FEATURES
-# ──────────────────────────────────────────────
+    accepted = query_db(
+        """
+        SELECT p.id, j.title, j.client_id
+        FROM proposals p
+        JOIN jobs j ON p.job_id=j.id
+        WHERE p.job_id=? AND p.freelancer_id=? AND p.status='accepted'
+        """,
+        [job_id, user["id"]],
+        one=True,
+    )
+    if not accepted:
+        return jsonify({"error": "Only the accepted freelancer can submit work"}), 403
 
-# ── 1. FRAUD DETECTION — live real-time analyzer
-@app.route('/api/ai/analyze-fraud', methods=['POST'])
+    escrow = query_db(
+        "SELECT * FROM escrow WHERE job_id=? AND freelancer_id=? AND status='held'",
+        [job_id, user["id"]],
+        one=True,
+    )
+    if not escrow:
+        return jsonify({"error": "Escrow must be funded before work can be submitted"}), 400
+
+    if request.content_type and "multipart/form-data" in request.content_type:
+        delivery_message = request.form.get("delivery_message", "").strip()
+        delivery_url = request.form.get("delivery_url", "").strip()
+        uploaded_zip = request.files.get("work_zip")
+        uploaded_files = request.files.getlist("work_files")
+        relative_paths = request.form.getlist("relative_paths")
+    else:
+        data = get_json_safe()
+        delivery_message = data.get("delivery_message", "").strip()
+        delivery_url = data.get("delivery_url", "").strip()
+        uploaded_zip = None
+        uploaded_files = []
+        relative_paths = []
+
+    if uploaded_zip and uploaded_zip.filename and not uploaded_zip.filename.lower().endswith(".zip"):
+        return jsonify({"error": "Only .zip archives are allowed for direct file uploads"}), 400
+
+    valid_folder_files = [item for item in uploaded_files if item and item.filename]
+    if not delivery_message and not delivery_url and not uploaded_zip and not valid_folder_files:
+        return jsonify({"error": "Add a delivery note, work link, zip file, or folder upload"}), 400
+
+    archive_name = ""
+    archive_path = ""
+    if uploaded_zip and uploaded_zip.filename:
+        archive_name, archive_path = save_submission_archive(
+            job_id,
+            user["id"],
+            uploaded_zip=uploaded_zip,
+        )
+    elif valid_folder_files:
+        archive_name, archive_path = save_submission_archive(
+            job_id,
+            user["id"],
+            uploaded_files=valid_folder_files,
+            relative_paths=relative_paths,
+        )
+
+    submission_id = mutate_db(
+        """
+        INSERT INTO work_submissions (job_id, freelancer_id, escrow_id, delivery_message, delivery_url, upload_archive_name, upload_archive_path, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+        """,
+        [job_id, user["id"], escrow["id"], delivery_message, delivery_url, archive_name, archive_path, "submitted"],
+    )
+    mutate_db("UPDATE jobs SET status='submitted' WHERE id=?", [job_id])
+
+    notify_and_email(
+        accepted["client_id"],
+        f"{user.get('full_name') or user['username']} submitted work for '{accepted['title']}'.",
+        "info",
+        email_subject=f"Work submitted for {accepted['title']}",
+        email_body=(
+            f"{user.get('full_name') or user['username']} submitted work for '{accepted['title']}'.\n\n"
+            f"Delivery note:\n{delivery_message or 'Shared via link only.'}\n\n"
+            f"Work link: {delivery_url or 'No external link provided.'}\n"
+            f"Archive attached in app: {'Yes' if archive_path else 'No'}"
+        ),
+    )
+    return jsonify({"message": "Work submitted for client review", "submission_id": submission_id}), 201
+
+
+@app.route("/api/submissions/<int:submission_id>/approve", methods=["POST"])
 @login_required
-def api_analyze_fraud_live():
-    d           = request.get_json(silent=True) or {}
-    title       = d.get('title',       '').strip()
-    description = d.get('description', '').strip()
-    if not title and not description:
-        return jsonify({'error': 'Provide title or description to analyze'}), 400
-    score, level, reasons, categories = analyze_fraud(title or 'Untitled', description or title)
-    tips = {
-        'Low':    ['Your posting looks clean. Add more detail to attract better applicants.'],
-        'Medium': ['Clarify your payment method (platform payments only).',
-                   'Expand your description to at least 50 words.',
-                   'Remove urgency language — it reduces freelancer trust.'],
-        'High':   ['Remove any cryptocurrency or untraceable payment references.',
-                   'Remove urgency/pressure language entirely.',
-                   'Never request sensitive personal or financial information.',
-                   'Write a clear, detailed description of the actual work required.'],
-    }.get(level, [])
-    return jsonify({'score': score, 'level': level,
-                    'reasons': reasons, 'categories': categories,
-                    'tips': tips}), 200
-
-# ── 2. SMART MATCHING — on-demand skill matcher
-@app.route('/api/ai/match', methods=['POST'])
-@login_required
-def api_match_by_skills():
-    d          = request.get_json(silent=True) or {}
-    skills_str = d.get('skills', '').strip()
-    if not skills_str:
-        return jsonify({'error': 'Provide at least one skill'}), 400
-    freelancers = query_db("SELECT * FROM users WHERE role='freelancer'")
-    matches     = match_freelancers(skills_str, [dict(f) for f in freelancers])
-    return jsonify({
-        'matches':       matches,
-        'total_pool':    len(freelancers),
-        'matched_count': len(matches),
-        'job_skills':    [s.strip() for s in skills_str.split(',') if s.strip()],
-    }), 200
-
-# ── 2b. SMART MATCHING — per job (client job detail page)
-@app.route('/api/ai/match-freelancers/<int:job_id>', methods=['GET'])
-@login_required
-def api_match_freelancers(job_id):
+def api_approve_submission(submission_id):
     user = current_user()
-    job  = query_db("SELECT * FROM jobs WHERE id=? AND client_id=?",
-                    [job_id, user['id']], one=True)
+    if user["role"] != "client":
+        return jsonify({"error": "Only clients can approve submitted work"}), 403
+
+    submission = query_db(
+        """
+        SELECT ws.*, j.client_id, j.title AS job_title, e.amount, e.status AS escrow_status
+        FROM work_submissions ws
+        JOIN jobs j ON ws.job_id=j.id
+        LEFT JOIN escrow e ON ws.escrow_id=e.id
+        WHERE ws.id=?
+        """,
+        [submission_id],
+        one=True,
+    )
+    if not submission:
+        return jsonify({"error": "Submission not found"}), 404
+    if submission["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if submission["status"] == "approved":
+        return jsonify({"error": "This submission has already been approved"}), 400
+    if submission["escrow_status"] != "held":
+        return jsonify({"error": "Escrow is not available for release"}), 400
+
+    with get_engine().begin() as txn:
+        txn.execute(text(
+            "UPDATE work_submissions SET status='approved', reviewed_at=CURRENT_TIMESTAMP WHERE id=:sid"
+        ), {"sid": submission_id})
+        txn.execute(text(
+            "UPDATE escrow SET status='released', released_at=CURRENT_TIMESTAMP WHERE id=:eid"
+        ), {"eid": submission["escrow_id"]})
+        txn.execute(text(
+            "UPDATE users SET balance=balance+:amt WHERE id=:fid"
+        ), {"amt": submission["amount"], "fid": submission["freelancer_id"]})
+        txn.execute(text(
+            "UPDATE jobs SET status='completed' WHERE id=:jid"
+        ), {"jid": submission["job_id"]})
+        txn.execute(text(
+            "UPDATE complaints SET status='resolved_by_client', resolution_action='released', resolved_at=CURRENT_TIMESTAMP WHERE submission_id=:sid AND status='open'"
+        ), {"sid": submission_id})
+
+    notify_and_email(
+        submission["freelancer_id"],
+        f"Your work for '{submission['job_title']}' was approved and paid.",
+        "success",
+        email_subject=f"Work approved for {submission['job_title']}",
+        email_body=(
+            f"Your submitted work for '{submission['job_title']}' was approved.\n\n"
+            f"${submission['amount']:.2f} has been released from escrow."
+        ),
+    )
+    notify_and_email(
+        user["id"],
+        f"You approved the submitted work for '{submission['job_title']}'.",
+        "success",
+        email_subject=f"Work approved for {submission['job_title']}",
+        email_body=(
+            f"You approved the submitted work for '{submission['job_title']}'.\n\n"
+            f"${submission['amount']:.2f} has been released from escrow."
+        ),
+    )
+    return jsonify({"message": "Work approved and payment released"}), 200
+
+
+@app.route("/api/submissions/<int:submission_id>/request-changes", methods=["POST"])
+@login_required
+def api_request_submission_changes(submission_id):
+    user = current_user()
+    if user["role"] != "client":
+        return jsonify({"error": "Only clients can request changes on submitted work"}), 403
+
+    submission = query_db(
+        """
+        SELECT ws.*, j.client_id, j.title AS job_title, e.status AS escrow_status
+        FROM work_submissions ws
+        JOIN jobs j ON ws.job_id=j.id
+        LEFT JOIN escrow e ON ws.escrow_id=e.id
+        WHERE ws.id=?
+        """,
+        [submission_id],
+        one=True,
+    )
+    if not submission:
+        return jsonify({"error": "Submission not found"}), 404
+    if submission["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if submission["status"] == "approved":
+        return jsonify({"error": "Approved work can no longer be sent back for changes"}), 400
+    if submission["escrow_status"] != "held":
+        return jsonify({"error": "Changes can only be requested while escrow is still held"}), 400
+
+    open_complaint = query_db(
+        "SELECT id FROM complaints WHERE submission_id=? AND status='open'",
+        [submission_id],
+        one=True,
+    )
+    if open_complaint:
+        return jsonify({"error": "An open complaint already exists for this delivery"}), 400
+
+    data = get_json_safe()
+    feedback = data.get("feedback", "").strip()
+    if len(feedback) < 20:
+        return jsonify({"error": "Please describe the requested changes in at least 20 characters and keep them within the original job requirements"}), 400
+
+    with get_engine().begin() as txn:
+        txn.execute(text(
+            """
+            UPDATE work_submissions
+            SET status='changes_requested',
+                client_feedback=:feedback,
+                reviewed_at=CURRENT_TIMESTAMP
+            WHERE id=:sid
+            """
+        ), {"feedback": feedback, "sid": submission_id})
+        txn.execute(text(
+            "UPDATE jobs SET status='changes_requested' WHERE id=:jid"
+        ), {"jid": submission["job_id"]})
+
+    notify_and_email(
+        submission["freelancer_id"],
+        f"Changes were requested for '{submission['job_title']}'.",
+        "warning",
+        email_subject=f"Changes requested for {submission['job_title']}",
+        email_body=(
+            f"The client requested changes for '{submission['job_title']}'.\n\n"
+            "Requested revisions should stay within the original project scope.\n\n"
+            f"Client feedback:\n{feedback}"
+        ),
+    )
+    return jsonify({"message": "Change request sent to the freelancer"}), 200
+
+
+@app.route("/api/jobs/<int:job_id>/complaints", methods=["POST"])
+@login_required
+def api_file_complaint(job_id):
+    user = current_user()
+    if user["role"] not in ("client", "freelancer"):
+        return jsonify({"error": "Only clients or freelancers can file complaints"}), 403
+
+    job = query_db("SELECT * FROM jobs WHERE id=?", [job_id], one=True)
     if not job:
-        return jsonify({'error': 'Job not found or not yours'}), 404
-    freelancers = query_db("SELECT * FROM users WHERE role='freelancer'")
-    matched     = match_freelancers(job['skills_required'], [dict(f) for f in freelancers])
-    return jsonify({'matches': matched, 'job_skills': job['skills_required']}), 200
+        return jsonify({"error": "Job not found"}), 404
 
-# ── 3. PROPOSAL GENERATOR — per job (job detail page)
-@app.route('/api/ai/generate-proposal', methods=['POST'])
+    accepted = query_db(
+        "SELECT * FROM proposals WHERE job_id=? AND status='accepted'",
+        [job_id],
+        one=True,
+    )
+    if not accepted:
+        return jsonify({"error": "No accepted proposal exists for this job"}), 400
+
+    if user["role"] == "client" and job["client_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+    if user["role"] == "freelancer" and accepted["freelancer_id"] != user["id"]:
+        return jsonify({"error": "Not authorized"}), 403
+
+    data = get_json_safe()
+    message = data.get("message", "").strip()
+    if len(message) < 15:
+        return jsonify({"error": "Complaint details must be at least 15 characters"}), 400
+
+    escrow = query_db("SELECT * FROM escrow WHERE job_id=? ORDER BY created_at DESC LIMIT 1", [job_id], one=True)
+    submission = query_db(
+        "SELECT * FROM work_submissions WHERE job_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+        [job_id],
+        one=True,
+    )
+    against_user_id = accepted["freelancer_id"] if user["role"] == "client" else job["client_id"]
+
+    complaint_id = mutate_db(
+        """
+        INSERT INTO complaints (job_id, escrow_id, submission_id, complainant_id, against_user_id, message, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+        """,
+        [
+            job_id,
+            escrow["id"] if escrow else None,
+            submission["id"] if submission else None,
+            user["id"],
+            against_user_id,
+            message,
+            "open",
+        ],
+    )
+
+    if submission:
+        mutate_db("UPDATE work_submissions SET status='disputed' WHERE id=?", [submission["id"]])
+    mutate_db("UPDATE jobs SET status='disputed' WHERE id=?", [job_id])
+
+    email_admin(
+        f"Complaint opened for {job['title']}",
+        (
+            f"A complaint was filed for '{job['title']}'.\n\n"
+            f"Complainant: {user.get('full_name') or user['username']}\n"
+            f"Message:\n{message}"
+        ),
+    )
+    notify_and_email(
+        against_user_id,
+        f"A complaint was filed on '{job['title']}'. An admin will review it.",
+        "warning",
+        email_subject=f"Complaint opened for {job['title']}",
+        email_body=(
+            f"A complaint was filed on '{job['title']}'.\n\n"
+            "An admin will review the case and decide the outcome."
+        ),
+    )
+    return jsonify({"message": "Complaint submitted for admin review", "complaint_id": complaint_id}), 201
+
+
+@app.route("/api/admin/complaints/<int:complaint_id>/resolve", methods=["POST"])
+@login_required
+@admin_required
+def api_admin_resolve_complaint(complaint_id):
+    complaint = query_db(
+        """
+        SELECT c.*, j.title AS job_title, e.amount, e.status AS escrow_status, e.client_id, e.freelancer_id
+        FROM complaints c
+        JOIN jobs j ON c.job_id=j.id
+        LEFT JOIN escrow e ON c.escrow_id=e.id
+        WHERE c.id=?
+        """,
+        [complaint_id],
+        one=True,
+    )
+    if not complaint:
+        return jsonify({"error": "Complaint not found"}), 404
+    if complaint["status"] != "open":
+        return jsonify({"error": "Complaint has already been resolved"}), 400
+
+    data = get_json_safe()
+    action = data.get("action", "").strip().lower()
+    admin_notes = data.get("admin_notes", "").strip()
+    if action not in ("release", "refund", "close"):
+        return jsonify({"error": "Action must be release, refund, or close"}), 400
+
+    resolution_status = "resolved_closed"
+    with get_engine().begin() as txn:
+        if action == "release":
+            if complaint["escrow_status"] != "held":
+                return jsonify({"error": "Escrow cannot be released for this complaint"}), 400
+            txn.execute(text(
+                "UPDATE escrow SET status='released', released_at=CURRENT_TIMESTAMP WHERE id=:eid"
+            ), {"eid": complaint["escrow_id"]})
+            txn.execute(text(
+                "UPDATE users SET balance=balance+:amt WHERE id=:fid"
+            ), {"amt": complaint["amount"], "fid": complaint["freelancer_id"]})
+            txn.execute(text(
+                "UPDATE jobs SET status='completed' WHERE id=:jid"
+            ), {"jid": complaint["job_id"]})
+            if complaint["submission_id"]:
+                txn.execute(text(
+                    "UPDATE work_submissions SET status='approved', reviewed_at=CURRENT_TIMESTAMP WHERE id=:sid"
+                ), {"sid": complaint["submission_id"]})
+            resolution_status = "resolved_uphold_freelancer"
+        elif action == "refund":
+            if complaint["escrow_status"] != "held":
+                return jsonify({"error": "Escrow cannot be refunded for this complaint"}), 400
+            txn.execute(text(
+                "UPDATE escrow SET status='refunded', released_at=CURRENT_TIMESTAMP WHERE id=:eid"
+            ), {"eid": complaint["escrow_id"]})
+            txn.execute(text(
+                "UPDATE users SET balance=balance+:amt WHERE id=:cid"
+            ), {"amt": complaint["amount"], "cid": complaint["client_id"]})
+            txn.execute(text(
+                "UPDATE jobs SET status='refunded' WHERE id=:jid"
+            ), {"jid": complaint["job_id"]})
+            if complaint["submission_id"]:
+                txn.execute(text(
+                    "UPDATE work_submissions SET status='rejected', reviewed_at=CURRENT_TIMESTAMP, client_feedback=:notes WHERE id=:sid"
+                ), {"sid": complaint["submission_id"], "notes": admin_notes or "Admin refunded escrow after review."})
+            resolution_status = "resolved_uphold_client"
+        else:
+            txn.execute(text(
+                "UPDATE jobs SET status='in_progress' WHERE id=:jid"
+            ), {"jid": complaint["job_id"]})
+            if complaint["submission_id"]:
+                txn.execute(text(
+                    "UPDATE work_submissions SET status='submitted', client_feedback=:notes WHERE id=:sid"
+                ), {"sid": complaint["submission_id"], "notes": admin_notes})
+
+        txn.execute(text(
+            """
+            UPDATE complaints
+            SET status=:status,
+                admin_notes=:notes,
+                resolution_action=:action,
+                resolved_at=CURRENT_TIMESTAMP
+            WHERE id=:cid
+            """
+        ), {"status": resolution_status, "notes": admin_notes, "action": action, "cid": complaint_id})
+
+    if complaint["client_id"]:
+        notify_and_email(
+            complaint["client_id"],
+            f"Admin resolved the complaint on '{complaint['job_title']}' with action: {action}.",
+            "info",
+            email_subject=f"Complaint resolved for {complaint['job_title']}",
+            email_body=(
+                f"An admin resolved the complaint on '{complaint['job_title']}'.\n\n"
+                f"Action: {action}\n"
+                f"Notes: {admin_notes or 'No additional notes.'}"
+            ),
+        )
+    if complaint["freelancer_id"]:
+        notify_and_email(
+            complaint["freelancer_id"],
+            f"Admin resolved the complaint on '{complaint['job_title']}' with action: {action}.",
+            "info",
+            email_subject=f"Complaint resolved for {complaint['job_title']}",
+            email_body=(
+                f"An admin resolved the complaint on '{complaint['job_title']}'.\n\n"
+                f"Action: {action}\n"
+                f"Notes: {admin_notes or 'No additional notes.'}"
+            ),
+        )
+    return jsonify({"message": f"Complaint resolved with action: {action}"}), 200
+
+
+@app.route("/api/ai/generate-proposal", methods=["POST"])
 @login_required
 def api_generate_proposal():
     user = current_user()
-    if user['role'] != 'freelancer':
-        return jsonify({'error': 'Only freelancers can use this feature'}), 403
-    d      = request.get_json(silent=True) or {}
-    job_id = d.get('job_id')
-    style  = d.get('style', 'random')
+    if user["role"] != "freelancer":
+        return jsonify({"error": "Only freelancers can use the proposal generator"}), 403
+
+    data = get_json_safe()
+    job_id = data.get("job_id")
     if not job_id:
-        return jsonify({'error': 'job_id is required'}), 400
+        return jsonify({"error": "job_id is required"}), 400
+
     job = query_db("SELECT * FROM jobs WHERE id=?", [job_id], one=True)
     if not job:
-        return jsonify({'error': 'Job not found'}), 404
-    text, style_used = generate_proposal(
-        job['title'], job['description'], job['skills_required'],
-        user['username'], user['skills'] or '', style=style)
-    return jsonify({'proposal': text, 'style': style_used}), 200
+        return jsonify({"error": "Job not found"}), 404
 
-# ── 3b. PROPOSAL GENERATOR — custom inputs (AI features demo page)
-@app.route('/api/ai/generate-proposal-custom', methods=['POST'])
+    style = data.get("style", "random")
+    proposal_text, style_used = generate_proposal(
+        job["title"],
+        job["description"],
+        job["skills_required"],
+        user.get("full_name") or user["username"],
+        user["skills"] or "",
+        style=style,
+    )
+    return jsonify({"proposal": proposal_text, "style": style_used}), 200
+
+
+@app.route("/api/ai/analyze-fraud", methods=["POST"])
 @login_required
-def api_generate_proposal_custom():
-    user = current_user()
-    d = request.get_json(silent=True) or {}
-    job_title       = d.get('job_title',       '').strip() or 'This Project'
-    job_description = d.get('job_description', '').strip() or 'the described work'
-    job_skills      = d.get('job_skills',      '').strip() or 'the required skills'
-    style           = d.get('style', 'random')
-    text, style_used = generate_proposal(
-        job_title, job_description, job_skills,
-        user['username'], user['skills'] or 'relevant technologies', style=style)
-    return jsonify({'proposal': text, 'style': style_used}), 200
+def api_analyze_fraud():
+    data = get_json_safe()
+    title = data.get("title", "").strip()
+    description = data.get("description", "").strip()
 
-# ──────────────────────────────────────────────
-# API — PROFILE / NOTIFICATIONS / STATS
-# ──────────────────────────────────────────────
-@app.route('/api/profile', methods=['PUT'])
+    if not title or not description:
+        return jsonify({"error": "Title and description required"}), 400
+
+    analysis = analyze_fraud_details(title, description)
+    return jsonify(
+        {
+            "fraud_score": analysis["score"],
+            "fraud_level": analysis["label"],
+            "fraud_reasons": analysis["reasons"],
+            "categories": analysis["categories"],
+            "fraud_components": analysis["components"],
+        }
+    ), 200
+
+
+@app.route("/api/profile", methods=["PUT"])
 @login_required
 def api_update_profile():
-    user   = current_user()
-    d      = request.get_json(silent=True) or {}
-    bio    = d.get('bio',    '').strip()
-    skills = d.get('skills', '').strip()
-    mutate_db("UPDATE users SET bio=?, skills=? WHERE id=?", [bio, skills, user['id']])
-    return jsonify({'message': 'Profile updated successfully'}), 200
+    user = current_user()
+    data = get_json_safe()
+    bio = data.get("bio", "").strip()
+    skills = data.get("skills", "").strip()
+    full_name = data.get("full_name", "").strip()
 
-@app.route('/api/notifications', methods=['GET'])
+    mutate_db(
+        "UPDATE users SET bio=?, skills=?, full_name=? WHERE id=?",
+        [bio, skills, full_name or (user.get("full_name") or user["username"]), user["id"]],
+    )
+    session["full_name"] = full_name or user.get("full_name") or user["username"]
+    return jsonify({"message": "Profile updated successfully"}), 200
+
+
+@app.route("/api/notifications", methods=["GET"])
 @login_required
 def api_get_notifications():
-    user   = current_user()
-    notifs = query_db("""
-        SELECT * FROM notifications
-        WHERE  user_id = ?
-        ORDER  BY created_at DESC
-        LIMIT  20
-    """, [user['id']])
-    return jsonify({'notifications': [dict(n) for n in notifs]}), 200
+    user = current_user()
+    notifications = query_db(
+        "SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 25",
+        [user["id"]],
+    )
+    for notification in notifications:
+        notification["created_at_iso"] = iso_datetime(notification.get("created_at"))
+    unread = query_db(
+        "SELECT COUNT(*) AS c FROM notifications WHERE user_id=? AND is_read=0",
+        [user["id"]],
+        one=True,
+    )["c"]
+    return jsonify({"notifications": notifications, "unread": unread}), 200
 
-@app.route('/api/notifications/read', methods=['POST'])
+
+@app.route("/api/notifications/read", methods=["POST"])
 @login_required
 def api_mark_notifications_read():
     user = current_user()
-    mutate_db("UPDATE notifications SET is_read=1 WHERE user_id=?", [user['id']])
-    return jsonify({'message': 'All marked as read'}), 200
+    mutate_db("UPDATE notifications SET is_read=1 WHERE user_id=?", [user["id"]])
+    return jsonify({"message": "All marked as read"}), 200
 
-@app.route('/api/stats', methods=['GET'])
+
+@app.route("/api/stats", methods=["GET"])
 @login_required
 def api_stats():
-    user    = current_user()
-    balance = query_db("SELECT balance FROM users WHERE id=?", [user['id']], one=True)['balance']
-    if user['role'] == 'client':
-        total_jobs      = query_db("SELECT COUNT(*) AS c FROM jobs WHERE client_id=?",
-                                   [user['id']], one=True)['c']
-        active_jobs     = query_db("SELECT COUNT(*) AS c FROM jobs WHERE client_id=? AND status='open'",
-                                   [user['id']], one=True)['c']
-        total_proposals = query_db("""
-            SELECT COUNT(*) AS c FROM proposals p
-            JOIN   jobs j ON p.job_id = j.id WHERE j.client_id = ?
-        """, [user['id']], one=True)['c']
-        escrow_held     = query_db("""
-            SELECT COALESCE(SUM(amount),0) AS s FROM escrow
-            WHERE  client_id=? AND status='held'
-        """, [user['id']], one=True)['s']
-        return jsonify({'total_jobs': total_jobs, 'active_jobs': active_jobs,
-                        'total_proposals': total_proposals, 'escrow_held': escrow_held,
-                        'balance': balance})
-    else:
-        applied   = query_db("SELECT COUNT(*) AS c FROM proposals WHERE freelancer_id=?",
-                             [user['id']], one=True)['c']
-        accepted  = query_db("SELECT COUNT(*) AS c FROM proposals WHERE freelancer_id=? AND status='accepted'",
-                             [user['id']], one=True)['c']
-        available = query_db("SELECT COUNT(*) AS c FROM jobs WHERE status='open'", one=True)['c']
-        return jsonify({'applied': applied, 'accepted': accepted,
-                        'available_jobs': available, 'balance': balance})
+    user = current_user()
+    fresh_balance = query_db("SELECT balance FROM users WHERE id=?", [user["id"]], one=True)["balance"]
 
-# ──────────────────────────────────────────────
-# ENTRY POINT
-# ──────────────────────────────────────────────
-if __name__ == '__main__':
+    if user["role"] == "client":
+        stats = query_db(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM jobs WHERE client_id=:uid) AS total_jobs,
+                (SELECT COUNT(*) FROM jobs WHERE client_id=:uid AND status='open') AS active_jobs,
+                (SELECT COUNT(*) FROM proposals p JOIN jobs j ON p.job_id=j.id WHERE j.client_id=:uid) AS total_proposals,
+                (SELECT COALESCE(SUM(amount),0) FROM escrow WHERE client_id=:uid AND status='held') AS escrow_held,
+                (SELECT COUNT(*) FROM jobs WHERE client_id=:uid AND status='completed') AS completed_jobs
+            """,
+            {"uid": user["id"]},
+            one=True,
+        )
+        return jsonify({**stats, "balance": fresh_balance}), 200
+
+    stats = query_db(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM proposals WHERE freelancer_id=:uid) AS applied,
+            (SELECT COUNT(*) FROM proposals WHERE freelancer_id=:uid AND status='accepted') AS accepted,
+            (SELECT COUNT(*) FROM proposals WHERE freelancer_id=:uid AND status='pending') AS pending
+        """,
+        {"uid": user["id"]},
+        one=True,
+    )
+    open_jobs = query_db(
+        """
+        SELECT j.*, COALESCE(u.full_name, u.username) AS client_name,
+               (SELECT COUNT(*) FROM proposals WHERE job_id=j.id) AS proposal_count
+        FROM jobs j
+        JOIN users u ON j.client_id=u.id
+        WHERE j.status='open'
+        ORDER BY j.created_at DESC
+        """
+    )
+    stats["available_jobs"] = len(match_jobs_for_freelancer(open_jobs, user))
+    return jsonify({**stats, "balance": fresh_balance}), 200
+
+
+@app.route("/api/ai/match-freelancers/<int:job_id>", methods=["GET"])
+@login_required
+def api_match_freelancers(job_id):
+    """
+    Returns the top skill-based matched freelancers for a job.
+    Uses the existing weighted composite scorer (skill overlap + rating + experience).
+    """
+    user = current_user()
+    if user["role"] != "client":
+        return jsonify({"error": "Only clients can use freelancer matching"}), 403
+
+    job = query_db("SELECT * FROM jobs WHERE id=? AND client_id=?", [job_id, user["id"]], one=True)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    freelancers = query_db("SELECT * FROM users WHERE role='freelancer'")
+    matches = hybrid_match_freelancers(job, freelancers)
+    return jsonify({"job_id": job_id, "method": "hybrid_semantic_business", "matches": matches, "total": len(matches)}), 200
+
+
+@app.route("/api/ai/ml-match/<int:job_id>", methods=["GET"])
+@login_required
+def api_ml_match_freelancers(job_id):
+    """
+    TF-IDF semantic matching route.
+    Scores freelancers based on full text similarity (job description vs skills+bio).
+    Runs independently of the keyword-based matcher — does NOT replace it.
+    Returns top 3 by ml_score.
+    """
+    user = current_user()
+    if user["role"] != "client":
+        return jsonify({"error": "Only clients can use freelancer matching"}), 403
+
+    job = query_db("SELECT * FROM jobs WHERE id=? AND client_id=?", [job_id, user["id"]], one=True)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    freelancers = query_db("SELECT * FROM users WHERE role='freelancer'")
+
+    try:
+        ml_matches = ml_match_freelancers(dict(job), [dict(f) for f in freelancers])
+    except Exception as exc:
+        return jsonify({"error": f"ML matching failed: {str(exc)}"}), 500
+
+    top3 = ml_matches[:3]
+    return jsonify({
+        "job_id":  job_id,
+        "method":  "tfidf_cosine_similarity",
+        "matches": top3,
+        "total":   len(ml_matches),
+    }), 200
+
+
+@app.errorhandler(404)
+def not_found(_error):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not found"}), 404
+    return render_template("404.html", user=current_user()), 404
+
+
+@app.errorhandler(500)
+def server_error(_error):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Server error"}), 500
+    return render_template("500.html", user=current_user()), 500
+
+
+if __name__ == "__main__":
     init_db()
-    print(f"\n  Database : {DATABASE}")
-    print(f"  Templates: {TEMPLATE_DIR}")
-    print(f"  Static   : {STATIC_DIR}\n")
-    app.run(debug=True, port=5000, host='0.0.0.0')
+    app.run(debug=True, port=5000)
