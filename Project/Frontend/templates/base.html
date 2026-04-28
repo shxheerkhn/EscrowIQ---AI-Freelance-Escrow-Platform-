@@ -20,6 +20,17 @@
   --success: #84cc16;
   --warning: #f59e0b;
   --danger: #f87171;
+  --violet: #8b5cf6;
+  --violet2: #c4b5fd;
+  --violet-g: rgba(139, 92, 246, 0.12);
+  --emerald: #10b981;
+  --emerald2: #6ee7b7;
+  --amber: #f59e0b;
+  --amber2: #fcd34d;
+  --red: #ef4444;
+  --pink: #fb7185;
+  --cyan: #22d3ee;
+  --cyan2: #67e8f9;
   --text: #e5edf5;
   --text2: #98a8ba;
   --text3: #64748b;
@@ -29,6 +40,7 @@
   --radius-sm: 12px;
   --radius-xs: 8px;
   --font: 'Inter', sans-serif;
+  --font-h: 'Inter', sans-serif;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -81,16 +93,15 @@ body::before {
   text-decoration: none;
 }
 .nav-logo {
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 10px;
   background: rgba(45, 212, 191, 0.12);
   border: 1px solid rgba(45, 212, 191, 0.16);
   color: var(--accent);
-  font-size: 0.88rem;
-  font-weight: 800;
 }
 .nav-brand-title {
   font-size: 0.98rem;
@@ -572,6 +583,7 @@ body::before {
   gap: 0.7rem;
   padding: 0.9rem 1rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  cursor: pointer;
 }
 .notif-item:hover { background: rgba(148, 163, 184, 0.06); }
 .notif-item.unread { background: rgba(45, 212, 191, 0.08); }
@@ -661,7 +673,18 @@ body::before {
 
 <nav class="navbar">
   <a href="/" class="nav-brand">
-    <div class="nav-logo">IQ</div>
+    <div class="nav-logo" aria-hidden="true">
+      <svg viewBox="0 0 48 48" width="24" height="24" fill="none">
+        <path d="M24 4 39 10v10c0 10.3-6 19.4-15 24-9-4.6-15-13.7-15-24V10L24 4Z" fill="url(#shieldFill)" stroke="rgba(103,232,249,.55)" stroke-width="1.4"/>
+        <path d="M18 24.5 22 28.5 30 19.5" stroke="#06211d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <defs>
+          <linearGradient id="shieldFill" x1="10" y1="7" x2="37" y2="40" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#67e8f9"/>
+            <stop offset="1" stop-color="#2dd4bf"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
     <div>
       <div class="nav-brand-title">EscrowIQ</div>
       <div class="nav-brand-sub">Freelance escrow platform</div>
@@ -678,9 +701,11 @@ body::before {
           <span class="nav-link-text">Complaints</span>
         </a>
       {% else %}
-        <a href="/jobs" class="nav-link {% if request.path.startswith('/jobs') %}active{% endif %}">
-          <span class="nav-link-text">Jobs</span>
-        </a>
+        {% if session.get('role') == 'freelancer' %}
+          <a href="/jobs" class="nav-link {% if request.path.startswith('/jobs') %}active{% endif %}">
+            <span class="nav-link-text">Jobs</span>
+          </a>
+        {% endif %}
         <a href="/escrow" class="nav-link {% if request.path=='/escrow' %}active{% endif %}">
           <span class="nav-link-text">Escrow</span>
         </a>
@@ -791,7 +816,10 @@ async function loadNotifications() {
     countEl.style.display = unread ? "inline-flex" : "none";
   }
   list.innerHTML = data.notifications.map((n) => `
-    <div class="notif-item ${n.is_read ? "" : "unread"}">
+    <div class="notif-item ${n.is_read ? "" : "unread"}"
+         data-id="${n.id}"
+         data-url="${(n.action_url || "").replace(/"/g, "&quot;")}"
+         data-message="${(n.message || "").replace(/"/g, "&quot;")}">
       ${!n.is_read ? '<div class="notif-dot"></div>' : '<div style="width:8px;flex-shrink:0"></div>'}
       <div style="flex:1;min-width:0">
         <div style="font-size:.84rem;color:var(--text);line-height:1.5">${n.message}</div>
@@ -799,6 +827,11 @@ async function loadNotifications() {
       </div>
     </div>
   `).join("");
+  list.querySelectorAll(".notif-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      openNotification(item.dataset.id, item.dataset.url, item.dataset.message);
+    });
+  });
 }
 
 function formatNotifDate(value) {
@@ -813,6 +846,21 @@ async function markRead() {
   document.getElementById("notif-count").style.display = "none";
   loadNotifications();
   showToast("All notifications cleared", "success");
+}
+
+async function openNotification(id, actionUrl, fallbackMessage) {
+  if (id) {
+    try {
+      await apiFetch(`/api/notifications/${id}/read`, { method: "POST" });
+    } catch (e) {}
+  }
+  if (actionUrl) {
+    window.location.href = actionUrl;
+    return;
+  }
+  if (fallbackMessage) {
+    showToast(fallbackMessage, "info");
+  }
 }
 
 {% if session.user_id %}
