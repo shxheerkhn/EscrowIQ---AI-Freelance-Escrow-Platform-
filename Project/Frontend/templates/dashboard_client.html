@@ -186,6 +186,19 @@ async function postJob() {
     box.innerHTML = '<div class="alert alert-error">Please fill in all required fields</div>';
     return;
   }
+  const skillList = skills.split(',').map((s) => s.trim()).filter(Boolean);
+  if (desc.length < 30 || desc.split(/\s+/).filter(Boolean).length < 6) {
+    box.innerHTML = '<div class="alert alert-error">Job description must be at least 30 characters and 6 words.</div>';
+    return;
+  }
+  if (skillList.length < 2) {
+    box.innerHTML = '<div class="alert alert-error">Add at least 2 required skills for a job posting.</div>';
+    return;
+  }
+  if (skillList.some((s) => s.length < 2)) {
+    box.innerHTML = '<div class="alert alert-error">Each required skill must be at least 2 characters long.</div>';
+    return;
+  }
 
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Running checks';

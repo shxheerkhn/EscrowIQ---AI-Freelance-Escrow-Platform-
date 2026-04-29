@@ -5,6 +5,7 @@ Backend: Flask + SQLAlchemy Core with PostgreSQL
 from __future__ import annotations
 
 import json
+import html
 import os
 import random
 import re
@@ -36,6 +37,7 @@ TEMPLATE_DIR = os.path.join(BASE_DIR, "Frontend", "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "Frontend", "static")
 UPLOADS_DIR = os.path.join(BACKEND_DIR, "uploads")
 SUBMISSIONS_DIR = os.path.join(UPLOADS_DIR, "submissions")
+EMAIL_LOGO_PATH = os.path.join(STATIC_DIR, "images", "LOGO.png")
 
 # ML matching module — TF-IDF semantic matching (addition, not replacement of existing matcher)
 def load_local_env():
@@ -560,6 +562,55 @@ def parse_skills(skills_str):
     return {normalise_skill(s) for s in (skills_str or "").split(",") if s.strip()}
 
 
+def split_skill_entries(skills_str):
+    seen = set()
+    entries = []
+    for raw_skill in (skills_str or "").split(","):
+        cleaned = re.sub(r"\s+", " ", raw_skill).strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        entries.append(cleaned)
+    return entries
+
+
+def validate_password_strength(password):
+    if len(password or "") < 8:
+        return "Password must be at least 8 characters"
+    if not re.search(r"[A-Z]", password):
+        return "Password must include at least one uppercase letter"
+    if not re.search(r"[a-z]", password):
+        return "Password must include at least one lowercase letter"
+    if not re.search(r"\d", password):
+        return "Password must include at least one number"
+    return None
+
+
+def validate_freelancer_skills(skills_str):
+    entries = split_skill_entries(skills_str)
+    if not entries:
+        return "Freelancers must add at least one skill"
+    if any(len(skill) < 2 for skill in entries):
+        return "Each skill must be at least 2 characters long"
+    return None
+
+
+def validate_job_posting_fields(title, description, skills_str):
+    if len(title) < 5:
+        return "Job title must be at least 5 characters"
+    if len(description) < 30 or len(description.split()) < 6:
+        return "Job description must be at least 30 characters and 6 words"
+    skill_entries = split_skill_entries(skills_str)
+    if len(skill_entries) < 2:
+        return "Add at least 2 required skills for a job posting"
+    if any(len(skill) < 2 for skill in skill_entries):
+        return "Each required skill must be at least 2 characters long"
+    return None
+
+
 def match_freelancers(job_skills_str, all_freelancers):
     """
     Weighted matching algorithm:
@@ -938,6 +989,12 @@ def allowed_upload_name(filename):
     return lowered.endswith(".zip") or "." in lowered
 
 
+def is_valid_external_url(url):
+    if not url:
+        return True
+    return bool(re.match(r"^https?://", url.strip(), re.IGNORECASE))
+
+
 def save_submission_archive(job_id, freelancer_id, uploaded_zip=None, uploaded_files=None, relative_paths=None):
     os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
     token = secrets.token_hex(8)
@@ -1091,7 +1148,7 @@ def html_email(title, body_html, cta_label=None, cta_url=None):
         <!-- Header / Logo -->
         <tr><td style="padding-bottom:20px;text-align:center">
           <div style="display:inline-flex;align-items:center;gap:12px;text-decoration:none">
-            <img src="data:image/png;base64,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" alt="EscrowIQ" width="56" height="56" style="border-radius:50%;display:block;flex-shrink:0">
+            <img src="cid:escrowiq-logo" alt="EscrowIQ" width="56" height="56" style="border-radius:50%;display:block;flex-shrink:0">
             <span style="font-size:20px;font-weight:800;color:#e5edf5;letter-spacing:-.01em">EscrowIQ</span>
           </div>
         </td></tr>
@@ -1141,6 +1198,14 @@ def deliver_email(recipient, subject, text_body, html_body=None):
     message.set_content(text_body)
     if html_body:
         message.add_alternative(html_body, subtype="html")
+        if "cid:escrowiq-logo" in html_body and os.path.exists(EMAIL_LOGO_PATH):
+            with open(EMAIL_LOGO_PATH, "rb") as logo_file:
+                message.get_payload()[-1].add_related(
+                    logo_file.read(),
+                    maintype="image",
+                    subtype="png",
+                    cid="<escrowiq-logo>",
+                )
 
     if settings["use_tls"]:
         with smtplib.SMTP(settings["host"], settings["port"], timeout=20) as smtp:
@@ -1657,8 +1722,13 @@ def api_register():
         return jsonify({"error": "Full name must be 120 characters or fewer"}), 400
     if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
         return jsonify({"error": "Please enter a valid email address"}), 400
-    if len(password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    password_error = validate_password_strength(password)
+    if password_error:
+        return jsonify({"error": password_error}), 400
+    if role == "freelancer":
+        skills_error = validate_freelancer_skills(skills)
+        if skills_error:
+            return jsonify({"error": skills_error}), 400
     if query_db("SELECT id FROM users WHERE username=?", [username], one=True):
         return jsonify({"error": "Username already taken"}), 409
     if query_db("SELECT id FROM users WHERE email=?", [email], one=True):
@@ -1859,8 +1929,9 @@ def api_reset_password():
 
     if not email or not code or not password:
         return jsonify({"error": "Email, code, and password are required"}), 400
-    if len(password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    password_error = validate_password_strength(password)
+    if password_error:
+        return jsonify({"error": password_error}), 400
 
     user = query_db("SELECT id FROM users WHERE email=?", [email], one=True)
     if not user:
@@ -1891,8 +1962,9 @@ def api_post_job():
 
     if not all([title, description, skills, budget, deadline]):
         return jsonify({"error": "All fields are required"}), 400
-    if len(title) < 5:
-        return jsonify({"error": "Job title must be at least 5 characters"}), 400
+    job_validation_error = validate_job_posting_fields(title, description, skills)
+    if job_validation_error:
+        return jsonify({"error": job_validation_error}), 400
 
     try:
         budget = float(budget)
@@ -2025,6 +2097,24 @@ def api_submit_proposal():
             f"Bid amount: ${bid_amount:.2f}\n"
             f"Timeline: {timeline}\n\n"
             "Open EscrowIQ to review the application."
+        ),
+        email_html=html_email(
+            "New proposal received",
+            (
+                f"<p><strong style=\"color:#e5edf5\">{html.escape(user.get('full_name') or user['username'])}</strong> "
+                f"submitted a proposal for <strong style=\"color:#e5edf5\">{html.escape(job['title'])}</strong>.</p>"
+                f"<table style=\"width:100%;border-collapse:collapse;margin:18px 0\">"
+                f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;border-bottom:1px solid rgba(148,163,184,.1)\">Bid</td>"
+                f"<td style=\"padding:10px 0;color:#e5edf5;font-size:13px;text-align:right;border-bottom:1px solid rgba(148,163,184,.1)\">${bid_amount:.2f}</td></tr>"
+                f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;border-bottom:1px solid rgba(148,163,184,.1)\">Timeline</td>"
+                f"<td style=\"padding:10px 0;color:#e5edf5;font-size:13px;text-align:right;border-bottom:1px solid rgba(148,163,184,.1)\">{html.escape(timeline)}</td></tr>"
+                f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;vertical-align:top\">Cover letter</td>"
+                f"<td style=\"padding:10px 0;color:#98a8ba;font-size:13px;text-align:right\">{html.escape(cover_letter[:220])}{'...' if len(cover_letter) > 220 else ''}</td></tr>"
+                f"</table>"
+                "<p>Review the proposal in EscrowIQ to accept, reject, or continue comparing applicants.</p>"
+            ),
+            cta_label="Review Proposal",
+            cta_url=f"/jobs/{job_id}",
         ),
         action_url=f"/jobs/{job_id}",
     )
@@ -2160,26 +2250,17 @@ def api_escrow_deposit():
     amount = data.get("amount")
     freelancer_id = data.get("freelancer_id")
 
-    if not job_id or amount is None:
-        return jsonify({"error": "Job ID and amount are required"}), 400
-
-    try:
-        amount = float(amount)
-        if amount <= 0:
-            raise ValueError
-    except (ValueError, TypeError):
-        return jsonify({"error": "Amount must be a positive number"}), 400
+    if not job_id:
+        return jsonify({"error": "Job ID is required"}), 400
 
     job = query_db("SELECT * FROM jobs WHERE id=? AND client_id=?", [job_id, user["id"]], one=True)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    if round(amount, 2) != round(float(job["budget"]), 2):
-        return jsonify({"error": f"Escrow must be funded with the full agreed job budget of ${float(job['budget']):.2f}."}), 400
     if query_db("SELECT id FROM escrow WHERE job_id=? AND status='held'", [job_id], one=True):
         return jsonify({"error": "Active escrow already exists for this job"}), 409
     accepted = query_db(
         """
-        SELECT freelancer_id
+        SELECT freelancer_id, bid_amount
         FROM proposals
         WHERE job_id=? AND status='accepted'
         """,
@@ -2192,6 +2273,17 @@ def api_escrow_deposit():
         return jsonify({"error": "Accepted freelancer is required before funding escrow"}), 400
     if accepted["freelancer_id"] != freelancer_id:
         return jsonify({"error": "Escrow can only be funded for the accepted freelancer"}), 400
+    required_amount = round(float(accepted["bid_amount"]), 2)
+    if amount is None:
+        amount = required_amount
+    try:
+        amount = round(float(amount), 2)
+        if amount <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "Amount must be a positive number"}), 400
+    if amount != required_amount:
+        return jsonify({"error": f"Escrow must match the accepted bid amount of ${required_amount:.2f}."}), 400
 
     fresh = query_db("SELECT balance FROM users WHERE id=?", [user["id"]], one=True)
     if fresh["balance"] < amount:
@@ -2411,7 +2503,7 @@ def api_submit_work(job_id):
     if not escrow:
         return jsonify({"error": "Escrow must be funded before work can be submitted"}), 400
 
-    if request.content_type and "multipart/form-data" in request.content_type:
+    if (request.mimetype or "").lower() == "multipart/form-data":
         delivery_message = request.form.get("delivery_message", "").strip()
         delivery_url = request.form.get("delivery_url", "").strip()
         uploaded_zip = request.files.get("work_zip")
@@ -2425,10 +2517,18 @@ def api_submit_work(job_id):
         uploaded_files = []
         relative_paths = []
 
+    if not is_valid_external_url(delivery_url):
+        return jsonify({"error": "Work link must start with http:// or https://"}), 400
     if uploaded_zip and uploaded_zip.filename and not uploaded_zip.filename.lower().endswith(".zip"):
         return jsonify({"error": "Only .zip archives are allowed for direct file uploads"}), 400
 
     valid_folder_files = [item for item in uploaded_files if item and item.filename]
+    if uploaded_zip and valid_folder_files:
+        return jsonify({"error": "Choose either a zip archive or folder upload, not both"}), 400
+    if uploaded_zip and uploaded_zip.filename and not allowed_upload_name(uploaded_zip.filename):
+        return jsonify({"error": "The uploaded zip file name is invalid"}), 400
+    if any(not allowed_upload_name(item.filename) for item in valid_folder_files):
+        return jsonify({"error": "One or more uploaded files have invalid names"}), 400
     if not delivery_message and not delivery_url and not uploaded_zip and not valid_folder_files:
         return jsonify({"error": "Add a delivery note, work link, zip file, or folder upload"}), 400
 
@@ -2468,6 +2568,24 @@ def api_submit_work(job_id):
             f"Delivery note:\n{delivery_message or 'Shared via link only.'}\n\n"
             f"Work link: {delivery_url or 'No external link provided.'}\n"
             f"Archive attached in app: {'Yes' if archive_path else 'No'}"
+        ),
+        email_html=html_email(
+            "Work submitted for review",
+            (
+                f"<p><strong style=\"color:#e5edf5\">{html.escape(user.get('full_name') or user['username'])}</strong> "
+                f"submitted work for <strong style=\"color:#e5edf5\">{html.escape(accepted['title'])}</strong>.</p>"
+                f"<table style=\"width:100%;border-collapse:collapse;margin:18px 0\">"
+                f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;border-bottom:1px solid rgba(148,163,184,.1)\">Delivery note</td>"
+                f"<td style=\"padding:10px 0;color:#98a8ba;font-size:13px;text-align:right;border-bottom:1px solid rgba(148,163,184,.1)\">{html.escape((delivery_message or 'Shared via link only.')[:220])}{'...' if len(delivery_message or '') > 220 else ''}</td></tr>"
+                f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;border-bottom:1px solid rgba(148,163,184,.1)\">Work link</td>"
+                f"<td style=\"padding:10px 0;color:#e5edf5;font-size:13px;text-align:right;border-bottom:1px solid rgba(148,163,184,.1)\">{html.escape(delivery_url or 'No external link provided')}</td></tr>"
+                f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px\">Archive uploaded</td>"
+                f"<td style=\"padding:10px 0;color:#e5edf5;font-size:13px;text-align:right\">{'Yes' if archive_path else 'No'}</td></tr>"
+                f"</table>"
+                "<p>You can now review the delivery, request changes, approve the work, or file a complaint if admin review is needed.</p>"
+            ),
+            cta_label="Review Submission",
+            cta_url=f"/jobs/{job_id}",
         ),
         action_url=f"/jobs/{job_id}",
     )
@@ -2619,6 +2737,20 @@ def api_request_submission_changes(submission_id):
             "Requested revisions should stay within the original project scope.\n\n"
             f"Client feedback:\n{feedback}"
         ),
+        email_html=html_email(
+            "Changes requested on your submission",
+            (
+                f"<p>The client requested revisions for <strong style=\"color:#e5edf5\">{html.escape(submission['job_title'])}</strong>.</p>"
+                "<p>Requested revisions should stay within the original agreed project scope.</p>"
+                f"<div style=\"margin:18px 0;padding:16px 18px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.22);border-radius:12px\">"
+                f"<div style=\"font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#f59e0b;margin-bottom:8px\">Client feedback</div>"
+                f"<div style=\"color:#e5edf5;font-size:14px;line-height:1.7\">{html.escape(feedback).replace(chr(10), '<br>')}</div>"
+                "</div>"
+                "<p>Update the work and resubmit when the requested changes are addressed.</p>"
+            ),
+            cta_label="Open Project",
+            cta_url=f"/jobs/{submission['job_id']}",
+        ),
         action_url=f"/jobs/{submission['job_id']}",
     )
     return jsonify({"message": "Change request sent to the freelancer"}), 200
@@ -2698,6 +2830,19 @@ def api_file_complaint(job_id):
         email_body=(
             f"A complaint was filed on '{job['title']}'.\n\n"
             "An admin will review the case and decide the outcome."
+        ),
+        email_html=html_email(
+            "A complaint was opened on this project",
+            (
+                f"<p>A complaint was filed on <strong style=\"color:#e5edf5\">{html.escape(job['title'])}</strong>.</p>"
+                f"<div style=\"margin:18px 0;padding:16px 18px;background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.22);border-radius:12px\">"
+                f"<div style=\"font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#fb7185;margin-bottom:8px\">Status</div>"
+                "<div style=\"color:#e5edf5;font-size:14px;line-height:1.7\">An admin will review the case, assess the project history, and decide the outcome.</div>"
+                "</div>"
+                "<p>Keep communication and supporting details inside EscrowIQ while the complaint is under review.</p>"
+            ),
+            cta_label="View Complaint Context",
+            cta_url=f"/jobs/{job_id}",
         ),
         action_url=f"/jobs/{job_id}",
     )
@@ -2803,6 +2948,21 @@ def api_admin_resolve_complaint(complaint_id):
                 f"Action: {action}\n"
                 f"Notes: {admin_notes or 'No additional notes.'}"
             ),
+            email_html=html_email(
+                "Complaint resolved",
+                (
+                    f"<p>An admin resolved the complaint on <strong style=\"color:#e5edf5\">{html.escape(complaint['job_title'])}</strong>.</p>"
+                    f"<table style=\"width:100%;border-collapse:collapse;margin:18px 0\">"
+                    f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;border-bottom:1px solid rgba(148,163,184,.1)\">Resolution</td>"
+                    f"<td style=\"padding:10px 0;color:#e5edf5;font-size:13px;text-align:right;border-bottom:1px solid rgba(148,163,184,.1)\">{html.escape(action.title())}</td></tr>"
+                    f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;vertical-align:top\">Admin notes</td>"
+                    f"<td style=\"padding:10px 0;color:#98a8ba;font-size:13px;text-align:right\">{html.escape(admin_notes or 'No additional notes.')}</td></tr>"
+                    f"</table>"
+                    "<p>The job and escrow state were updated to match this resolution.</p>"
+                ),
+                cta_label="View Project",
+                cta_url=f"/jobs/{complaint['job_id']}",
+            ),
             action_url=f"/jobs/{complaint['job_id']}",
         )
     if complaint["freelancer_id"]:
@@ -2815,6 +2975,21 @@ def api_admin_resolve_complaint(complaint_id):
                 f"An admin resolved the complaint on '{complaint['job_title']}'.\n\n"
                 f"Action: {action}\n"
                 f"Notes: {admin_notes or 'No additional notes.'}"
+            ),
+            email_html=html_email(
+                "Complaint resolved",
+                (
+                    f"<p>An admin resolved the complaint on <strong style=\"color:#e5edf5\">{html.escape(complaint['job_title'])}</strong>.</p>"
+                    f"<table style=\"width:100%;border-collapse:collapse;margin:18px 0\">"
+                    f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;border-bottom:1px solid rgba(148,163,184,.1)\">Resolution</td>"
+                    f"<td style=\"padding:10px 0;color:#e5edf5;font-size:13px;text-align:right;border-bottom:1px solid rgba(148,163,184,.1)\">{html.escape(action.title())}</td></tr>"
+                    f"<tr><td style=\"padding:10px 0;color:#64748b;font-size:13px;vertical-align:top\">Admin notes</td>"
+                    f"<td style=\"padding:10px 0;color:#98a8ba;font-size:13px;text-align:right\">{html.escape(admin_notes or 'No additional notes.')}</td></tr>"
+                    f"</table>"
+                    "<p>The project state has been updated to reflect the admin decision.</p>"
+                ),
+                cta_label="View Project",
+                cta_url=f"/jobs/{complaint['job_id']}",
             ),
             action_url=f"/jobs/{complaint['job_id']}",
         )
@@ -2879,6 +3054,11 @@ def api_update_profile():
     bio = data.get("bio", "").strip()
     skills = data.get("skills", "").strip()
     full_name = data.get("full_name", "").strip()
+
+    if user["role"] == "freelancer":
+        skills_error = validate_freelancer_skills(skills)
+        if skills_error:
+            return jsonify({"error": skills_error}), 400
 
     mutate_db(
         "UPDATE users SET bio=?, skills=?, full_name=? WHERE id=?",

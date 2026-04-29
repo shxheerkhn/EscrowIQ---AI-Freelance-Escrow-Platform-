@@ -472,6 +472,288 @@ body::before {
 .toast.info { border-color: rgba(45, 212, 191, 0.18); }
 .toast.warning { border-color: rgba(245, 158, 11, 0.18); }
 
+.cookie-banner {
+  position: fixed;
+  left: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 1600;
+  display: none;
+  justify-content: center;
+  pointer-events: none;
+}
+.cookie-banner.show { display: flex; }
+.cookie-card {
+  position: relative;
+  width: min(780px, 100%);
+  padding: 1.15rem 1.15rem 1.05rem;
+  border-radius: 22px;
+  border: 1px solid rgba(245, 158, 11, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 26%),
+    radial-gradient(circle at bottom left, rgba(45, 212, 191, 0.08), transparent 32%),
+    linear-gradient(145deg, rgba(28, 17, 7, 0.97), rgba(39, 25, 10, 0.95) 45%, rgba(20, 28, 39, 0.98));
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.15rem;
+  pointer-events: all;
+  overflow: hidden;
+  transform-origin: bottom center;
+}
+.cookie-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, rgba(255,255,255,.05), transparent 32%, transparent 68%, rgba(255,255,255,.04)),
+    linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+  background-size: auto, 22px 22px, 22px 22px;
+  opacity: 0.65;
+  pointer-events: none;
+}
+.cookie-card.accepting-all,
+.cookie-card.accepting-essential {
+  animation: cookieChoice 620ms cubic-bezier(.22,1,.36,1) forwards;
+}
+@keyframes cookieChoice {
+  0% { opacity: 1; transform: translateY(0) scale(1); }
+  45% { opacity: 1; transform: translateY(-8px) scale(1.02); }
+  100% { opacity: 0; transform: translateY(24px) scale(0.94); }
+}
+.cookie-copy {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: 0.9rem;
+  align-items: flex-start;
+}
+.cookie-icon {
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18), rgba(251, 191, 36, 0.1));
+  border: 1px solid rgba(251, 191, 36, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+  font-size: 1.75rem;
+  animation: cookieFloat 3s ease-in-out infinite;
+}
+.cookie-icon::after {
+  content: "";
+  position: absolute;
+  width: 76px;
+  height: 76px;
+  border-radius: 18px;
+  border: 1px solid rgba(251, 191, 36, 0.08);
+  transform: rotate(12deg);
+}
+@keyframes cookieFloat {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-4px) rotate(-4deg); }
+}
+.cookie-title {
+  font-size: 0.96rem;
+  font-weight: 800;
+  margin-bottom: 0.28rem;
+  letter-spacing: 0.01em;
+}
+.cookie-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 24px;
+  padding: 0.22rem 0.62rem;
+  margin-bottom: 0.55rem;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  color: #fde68a;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.cookie-text {
+  color: #d0d7e2;
+  font-size: 0.83rem;
+  line-height: 1.6;
+  max-width: 35rem;
+}
+.cookie-actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+.cookie-actions .btn {
+  min-height: 42px;
+  border-radius: 12px;
+}
+.cookie-meta {
+  margin-top: 0.55rem;
+  color: rgba(255,255,255,.55);
+  font-size: 0.74rem;
+}
+
+.site-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 50% 35%, rgba(45, 212, 191, 0.12), transparent 18%),
+    radial-gradient(circle at 50% 65%, rgba(59, 130, 246, 0.08), transparent 22%),
+    linear-gradient(180deg, rgba(6, 10, 16, 0.98), rgba(11, 17, 24, 0.98));
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 420ms ease, visibility 420ms ease;
+}
+.site-loader.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.loader-shell {
+  position: relative;
+  width: min(420px, 86vw);
+  padding: 2rem 1.6rem;
+  border-radius: 28px;
+  border: 1px solid rgba(45, 212, 191, 0.16);
+  background:
+    linear-gradient(180deg, rgba(13, 20, 30, 0.88), rgba(16, 25, 36, 0.94));
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.loader-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(rgba(45, 212, 191, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 212, 191, 0.04) 1px, transparent 1px);
+  background-size: 18px 18px;
+  mask-image: radial-gradient(circle at center, black 40%, transparent 95%);
+  pointer-events: none;
+}
+.loader-orbit {
+  position: relative;
+  width: 154px;
+  height: 154px;
+  margin: 0 auto 1.35rem;
+}
+.loader-ring,
+.loader-ring::before,
+.loader-ring::after {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+.loader-ring {
+  border: 1px solid rgba(45, 212, 191, 0.24);
+  animation: loaderSpin 7s linear infinite;
+}
+.loader-ring::before,
+.loader-ring::after {
+  content: "";
+  border: 1px solid transparent;
+}
+.loader-ring::before {
+  inset: 14px;
+  border-top-color: rgba(103, 232, 249, 0.8);
+  border-right-color: rgba(103, 232, 249, 0.25);
+  animation: loaderSpinReverse 3.8s linear infinite;
+}
+.loader-ring::after {
+  inset: 32px;
+  border-left-color: rgba(45, 212, 191, 0.8);
+  border-bottom-color: rgba(45, 212, 191, 0.22);
+  animation: loaderSpin 2.4s linear infinite;
+}
+.loader-core {
+  position: absolute;
+  inset: 49px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(103, 232, 249, 0.95), rgba(45, 212, 191, 0.52) 35%, rgba(45, 212, 191, 0.05) 72%);
+  box-shadow: 0 0 28px rgba(45, 212, 191, 0.42);
+  animation: loaderPulse 1.8s ease-in-out infinite;
+}
+.loader-core::after {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.18);
+}
+.loader-copy {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+}
+.loader-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 26px;
+  padding: 0.2rem 0.7rem;
+  border-radius: 999px;
+  margin-bottom: 0.8rem;
+  background: rgba(45, 212, 191, 0.08);
+  border: 1px solid rgba(45, 212, 191, 0.16);
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.loader-title {
+  font-size: 1.18rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.loader-text {
+  color: var(--text2);
+  margin-top: 0.45rem;
+  font-size: 0.84rem;
+}
+.loader-bar {
+  width: min(240px, 100%);
+  height: 7px;
+  margin: 1rem auto 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255,255,255,.06);
+}
+.loader-bar span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(45, 212, 191, 0), rgba(45, 212, 191, 0.95), rgba(103, 232, 249, 0.95), rgba(45, 212, 191, 0));
+  animation: loaderSweep 1.6s ease-in-out infinite;
+}
+@keyframes loaderSpin { to { transform: rotate(360deg); } }
+@keyframes loaderSpinReverse { to { transform: rotate(-360deg); } }
+@keyframes loaderPulse {
+  0%, 100% { transform: scale(0.92); opacity: 0.88; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+@keyframes loaderSweep {
+  0% { transform: translateX(-130%); }
+  100% { transform: translateX(320%); }
+}
+
 .tabs {
   display: inline-flex;
   gap: 0.35rem;
@@ -665,6 +947,12 @@ body::before {
   .page-wrapper,
   .navbar { width: calc(100% - 1rem); }
   .nav-brand-sub, .nav-link-text { display: none; }
+  .cookie-card { align-items: stretch; flex-direction: column; }
+  .cookie-actions { justify-content: stretch; }
+  .cookie-actions .btn { width: 100%; }
+  .loader-shell { padding: 1.7rem 1.15rem; }
+  .loader-orbit { width: 132px; height: 132px; }
+  .loader-core { inset: 40px; }
 }
 </style>
 {% block extra_head %}{% endblock %}
@@ -729,12 +1017,48 @@ body::before {
   </div>
 </nav>
 
+<div id="site-loader" class="site-loader" aria-live="polite" aria-label="Loading screen">
+  <div class="loader-shell">
+    <div class="loader-orbit">
+      <div class="loader-ring"></div>
+      <div class="loader-core"></div>
+    </div>
+    <div class="loader-copy">
+      <div class="loader-kicker">System Sync</div>
+      <div class="loader-title">Booting EscrowIQ Interface</div>
+      <div class="loader-text">Aligning escrow state, notifications, and project signals.</div>
+      <div class="loader-bar"><span></span></div>
+    </div>
+  </div>
+</div>
+
 <div id="toast-container"></div>
+<div id="cookie-banner" class="cookie-banner" aria-live="polite" aria-label="Cookie consent">
+  <div class="cookie-card">
+    <div class="cookie-copy">
+      <div class="cookie-icon">🍪</div>
+      <div>
+        <div class="cookie-badge">Privacy Control</div>
+        <div class="cookie-title">Cookies on EscrowIQ</div>
+        <div class="cookie-text">
+          We use essential cookies to keep you signed in, protect forms with CSRF checks, and remember basic preferences. You can also allow analytics-style preference cookies to help us improve the experience.
+        </div>
+        <div class="cookie-meta">Your choice is saved on this device and you can revisit it later by clearing local site storage.</div>
+      </div>
+    </div>
+    <div class="cookie-actions">
+      <button class="btn btn-ghost btn-sm" onclick="setCookieConsent('essential', this)">Essential only</button>
+      <button class="btn btn-gradient btn-sm" onclick="setCookieConsent('all', this)">Accept all</button>
+    </div>
+  </div>
+</div>
 
 {% block content %}{% endblock %}
 
 <script>
 window.CSRF_TOKEN = "{{ csrf_token() }}";
+const COOKIE_CONSENT_KEY = "escrowiq_cookie_consent";
+let _loaderVisible = true;
 
 async function apiFetch(url, opts = {}) {
   const requestHeaders = {
@@ -773,6 +1097,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 async function doLogout() {
+  showSiteLoader("Signing you out");
   await apiFetch("/api/logout", { method: "POST" });
   window.location.href = "/";
 }
@@ -878,6 +1203,76 @@ function animateCount(el, target, prefix = "", suffix = "", duration = 1200) {
   };
   requestAnimationFrame(update);
 }
+
+function showSiteLoader(message = "Booting EscrowIQ Interface") {
+  const loader = document.getElementById("site-loader");
+  if (!loader) return;
+  const title = loader.querySelector(".loader-title");
+  if (title) title.textContent = message;
+  loader.classList.remove("hidden");
+  _loaderVisible = true;
+}
+
+function hideSiteLoader() {
+  const loader = document.getElementById("site-loader");
+  if (!loader) return;
+  loader.classList.add("hidden");
+  _loaderVisible = false;
+}
+
+function initSiteLoader() {
+  window.addEventListener("load", () => {
+    setTimeout(hideSiteLoader, 520);
+  });
+
+  document.querySelectorAll("a[href]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      const href = link.getAttribute("href") || "";
+      if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
+      if (link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (href.startsWith("http") && !href.startsWith(window.location.origin)) return;
+      showSiteLoader("Opening next view");
+    });
+  });
+
+  document.querySelectorAll("form").forEach((form) => {
+    form.addEventListener("submit", () => {
+      showSiteLoader("Processing request");
+    });
+  });
+}
+
+function setCookieConsent(level, btn) {
+  const banner = document.getElementById("cookie-banner");
+  const card = banner?.querySelector(".cookie-card");
+  if (!banner || !card) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Saving';
+  }
+  try {
+    localStorage.setItem(COOKIE_CONSENT_KEY, level);
+  } catch (_error) {}
+  card.classList.add(level === "all" ? "accepting-all" : "accepting-essential");
+  showToast(level === "all" ? "Cookie preferences saved" : "Essential cookies only", "success", 2200);
+  setTimeout(() => {
+    banner.classList.remove("show");
+    card.classList.remove("accepting-all", "accepting-essential");
+  }, 620);
+}
+
+function initCookieConsent() {
+  let consent = null;
+  try {
+    consent = localStorage.getItem(COOKIE_CONSENT_KEY);
+  } catch (_error) {}
+  if (!consent) {
+    document.getElementById("cookie-banner")?.classList.add("show");
+  }
+}
+
+initSiteLoader();
+initCookieConsent();
 
 </script>
 {% block scripts %}{% endblock %}

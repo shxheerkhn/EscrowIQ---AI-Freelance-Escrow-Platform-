@@ -112,7 +112,8 @@
       </div>
       <div class="form-group">
         <label class="form-label">Password *</label>
-        <input type="password" id="password" class="form-input" placeholder="At least 6 characters">
+        <input type="password" id="password" class="form-input" placeholder="8+ chars, upper/lowercase, number">
+        <div class="form-hint">Use at least 8 characters with an uppercase letter, lowercase letter, and a number.</div>
       </div>
     </div>
 
@@ -168,6 +169,21 @@ async function doRegister() {
   if (!username || !email || !password) {
     box.innerHTML = '<div class="alert alert-error">Please fill all required fields</div>';
     return;
+  }
+  if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+    box.innerHTML = '<div class="alert alert-error">Password must be at least 8 characters and include uppercase, lowercase, and a number.</div>';
+    return;
+  }
+  if (role === 'freelancer') {
+    const skillList = skills.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!skillList.length) {
+      box.innerHTML = '<div class="alert alert-error">Freelancers must add at least one skill.</div>';
+      return;
+    }
+    if (skillList.some((s) => s.length < 2)) {
+      box.innerHTML = '<div class="alert alert-error">Each skill must be at least 2 characters long.</div>';
+      return;
+    }
   }
 
   btn.disabled = true;

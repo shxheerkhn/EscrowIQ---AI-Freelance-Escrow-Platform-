@@ -616,11 +616,12 @@ async function confirmRejectProposal() {
 async function fundEscrow() {
   const btn = document.getElementById('escrow-btn');
   const box = document.getElementById('escrow-alert');
+  const amount = parseFloat(document.getElementById('escrow-amount').value || '0');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Locking';
   const { ok, data } = await apiFetch('/api/escrow/deposit', {
     method: 'POST',
-    body: JSON.stringify({ job_id: JOB_ID, freelancer_id: escrowFreelancerId })
+    body: JSON.stringify({ job_id: JOB_ID, freelancer_id: escrowFreelancerId, amount })
   });
   if (ok) {
     showToast(data.message, 'success');
@@ -694,37 +695,53 @@ async function submitWork() {
   const folderFiles = Array.from(document.getElementById('delivery-folder')?.files || []);
   const box = document.getElementById('submit-work-alert');
   const btn = document.getElementById('submit-work-btn');
+  const originalLabel = btn?.textContent || 'Submit work for review';
   if (zipFile && folderFiles.length) {
     box.innerHTML = '<div class="alert alert-error">Choose either a zip file or a folder, not both.</div>';
     return;
   }
+  if (deliveryUrl && !/^https?:\/\//i.test(deliveryUrl)) {
+    box.innerHTML = '<div class="alert alert-error">Work link must start with http:// or https://.</div>';
+    return;
+  }
+  if (!deliveryMessage && !deliveryUrl && !zipFile && !folderFiles.length) {
+    box.innerHTML = '<div class="alert alert-error">Add a delivery note, work link, zip file, or folder upload.</div>';
+    return;
+  }
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Submitting';
-  const formData = new FormData();
-  formData.append('delivery_message', deliveryMessage);
-  formData.append('delivery_url', deliveryUrl);
-  if (zipFile) {
-    formData.append('work_zip', zipFile);
-  }
-  folderFiles.forEach((file) => {
-    formData.append('work_files', file, file.name);
-    formData.append('relative_paths', file.webkitRelativePath || file.name);
-  });
-  const response = await fetch(`/api/jobs/${JOB_ID}/submit-work`, {
-    method: 'POST',
-    headers: { 'X-CSRF-Token': window.CSRF_TOKEN || '' },
-    body: formData
-  });
-  let data;
-  try { data = await response.json(); } catch { data = {}; }
-  if (response.ok) {
-    box.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
-    showToast('Work submitted successfully', 'success');
-    setTimeout(() => location.reload(), 1100);
-  } else {
-    box.innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+  try {
+    const formData = new FormData();
+    formData.append('delivery_message', deliveryMessage);
+    formData.append('delivery_url', deliveryUrl);
+    if (zipFile) {
+      formData.append('work_zip', zipFile);
+    }
+    folderFiles.forEach((file) => {
+      formData.append('work_files', file, file.name);
+      formData.append('relative_paths', file.webkitRelativePath || file.name);
+    });
+    const response = await fetch(`/api/jobs/${JOB_ID}/submit-work`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': window.CSRF_TOKEN || '' },
+      body: formData
+    });
+    let data;
+    try { data = await response.json(); } catch { data = {}; }
+    if (response.ok) {
+      box.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+      showToast('Work submitted successfully', 'success');
+      setTimeout(() => location.reload(), 1100);
+    } else {
+      box.innerHTML = `<div class="alert alert-error">${data.error || 'Unable to submit work right now.'}</div>`;
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
+  } catch (_error) {
+    box.innerHTML = '<div class="alert alert-error">Submission failed due to a network or browser error. Please try again.</div>';
     btn.disabled = false;
-    btn.innerHTML = 'Submit work for review';
+    btn.textContent = originalLabel;
   }
 }
 
