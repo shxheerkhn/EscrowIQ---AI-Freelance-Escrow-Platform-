@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% block title %}EscrowIQ - Freelance Escrow Platform{% endblock %}
+{% block extra_head %}
+<style>
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: 1.1rem;
+  align-items: stretch;
+  margin-bottom: 1.1rem;
+}
+.hero-main,
+.hero-side,
+.band,
+.cta-band {
+  background: linear-gradient(180deg, rgba(18, 25, 34, 0.92), rgba(22, 31, 43, 0.96));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+}
+.hero-main,
+.hero-side,
+.band,
+.cta-band { padding: 1.35rem; }
+.hero-main {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 420px;
+}
+.hero-title {
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.08;
+  font-weight: 700;
+  max-width: 12ch;
+  margin: 0.85rem 0 0.9rem;
+}
+.hero-copy {
+  max-width: 42rem;
+  color: var(--text2);
+  font-size: 0.98rem;
+}
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.2rem;
+}
+.hero-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 1.6rem;
+}
+.metric {
+  padding: 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.02);
+}
+.metric-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+.hero-side {
+  display: grid;
+  gap: 0.85rem;
+}
+.side-card {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.02);
+}
+.side-label {
+  color: var(--text3);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.side-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0.35rem 0 0.2rem;
+}
+.band + .band,
+.band + .cta-band { margin-top: 1.1rem; }
+.band-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+.band-card {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.02);
+}
+.band-title {
+  font-size: 0.98rem;
+  font-weight: 600;
+  margin-bottom: 0.45rem;
+}
+.band-copy {
+  color: var(--text2);
+  font-size: 0.9rem;
+}
+.jobs-list {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+.job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.02);
+}
+.job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  color: var(--text2);
+  font-size: 0.84rem;
+  margin-top: 0.3rem;
+}
+.cta-band {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+@media (max-width: 940px) {
+  .hero,
+  .band-grid { grid-template-columns: 1fr; }
+  .hero-metrics { grid-template-columns: 1fr; }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-wrapper">
+  <section class="hero">
+    <div class="hero-main">
+      <div>
+        <span class="eyebrow">Escrow-backed freelance hiring</span>
+        <h1 class="hero-title">A professional marketplace with payment trust built in.</h1>
+        <p class="hero-copy">
+          EscrowIQ helps clients and freelancers work through a clearer process: post work, review proposals, accept a fit, fund escrow, and complete payment with less uncertainty.
+        </p>
+        <div class="hero-actions">
+          <a href="/register?role=client" class="btn btn-gradient btn-lg">Post a job</a>
+          <a href="/register?role=freelancer" class="btn btn-ghost btn-lg">Find work</a>
+        </div>
+      </div>
+
+      <div class="hero-metrics">
+        <div class="metric">
+          <div class="metric-value" id="stat-jobs">{{ total_jobs }}</div>
+          <div class="text-sm text-muted">Open and historical jobs</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="stat-users">{{ total_users }}</div>
+          <div class="text-sm text-muted">Registered users</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="stat-escrow">${{ "%.0f"|format(total_escrow) }}</div>
+          <div class="text-sm text-muted">Released through escrow</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-side">
+      <div class="side-card">
+        <div class="side-label">Fraud review</div>
+        <div class="side-value">Built in</div>
+        <div class="text-sm text-muted">Each job is checked for risky language before it enters the normal hiring flow.</div>
+      </div>
+      <div class="side-card">
+        <div class="side-label">Matching</div>
+        <div class="side-value">Role-aware</div>
+        <div class="text-sm text-muted">Freelancers see relevant work based on profile skills, while clients can compare proposals more clearly.</div>
+      </div>
+      <div class="side-card">
+        <div class="side-label">Escrow</div>
+        <div class="side-value">Accepted hire first</div>
+        <div class="text-sm text-muted">Funding follows proposal acceptance, which keeps the job, proposal, and payment states aligned.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <span class="eyebrow">How it works</span>
+    <div class="band-grid">
+      <div class="band-card">
+        <div class="band-title">Post or browse work</div>
+        <div class="band-copy">Clients create listings and freelancers review opportunities that match their skills and experience.</div>
+      </div>
+      <div class="band-card">
+        <div class="band-title">Review proposals</div>
+        <div class="band-copy">Clients accept one proposal, rejected proposals are handled cleanly, and the selected freelancer moves forward.</div>
+      </div>
+      <div class="band-card">
+        <div class="band-title">Fund and release escrow</div>
+        <div class="band-copy">Escrow is funded for the accepted freelancer, then released or refunded when the work reaches its decision point.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <span class="eyebrow">Platform features</span>
+    <div class="band-grid">
+      <div class="band-card">
+        <div class="band-title">Risk indicators</div>
+        <div class="band-copy">Jobs receive low, medium, or high fraud indicators based on rule-based checks in the current build.</div>
+      </div>
+      <div class="band-card">
+        <div class="band-title">Proposal support</div>
+        <div class="band-copy">Freelancers can generate a starting proposal draft and then edit it before submission.</div>
+      </div>
+      <div class="band-card">
+        <div class="band-title">Separate dashboards</div>
+        <div class="band-copy">Clients and freelancers each have focused work areas for their own day-to-day tasks.</div>
+      </div>
+    </div>
+  </section>
+
+  {% if open_jobs %}
+  <section class="band">
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <span class="eyebrow">Recent jobs</span>
+        <h2 class="page-title" style="font-size:1.25rem;margin-top:.55rem">Latest open opportunities</h2>
+      </div>
+      <a href="/register" class="btn btn-ghost">View all</a>
+    </div>
+    <div class="jobs-list">
+      {% for job in open_jobs %}
+      <div class="job-row">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:0.98rem;font-weight:600">{{ job.title }}</div>
+          <div class="job-meta">
+            <span>{{ job.client_name }}</span>
+            <span>${{ "%.0f"|format(job.budget) }}</span>
+            <span>{{ job.deadline }}</span>
+            <span class="badge badge-{{ job.fraud_level|lower }}">{{ job.fraud_level }} risk</span>
+          </div>
+        </div>
+        <a href="/register" class="btn btn-primary btn-sm">Open</a>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="cta-band">
+    <div>
+      <span class="eyebrow">Get started</span>
+      <h2 class="page-title" style="font-size:1.25rem;margin-top:.55rem">Choose the side of the platform that fits your work.</h2>
+    </div>
+    <div class="hero-actions" style="margin-top:0">
+      <a href="/register?role=client" class="btn btn-gradient">I'm a client</a>
+      <a href="/register?role=freelancer" class="btn btn-ghost">I'm a freelancer</a>
+    </div>
+  </section>
+</div>
+{% endblock %}

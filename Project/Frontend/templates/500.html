@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}500 — Server Error{% endblock %}
+{% block content %}
+<div style="min-height:calc(100vh - 64px);display:flex;align-items:center;justify-content:center;padding:2rem;text-align:center">
+  <div>
+    <div style="font-size:6rem;line-height:1;margin-bottom:1rem">⚠️</div>
+    <h1 style="font-family:var(--font-h);font-size:3rem;font-weight:800;color:var(--text);margin-bottom:.75rem">500</h1>
+    <p style="font-size:1.125rem;color:var(--text2);margin-bottom:2rem">Something went wrong on our end. Please try again.</p>
+    <div style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap">
+      <a href="/" class="btn btn-primary">Go to Home</a>
+      <button onclick="history.back()" class="btn btn-ghost">Go Back</button>
+    </div>
+  </div>
+</div>
+{% endblock %}

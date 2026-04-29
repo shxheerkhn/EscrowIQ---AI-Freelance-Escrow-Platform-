@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Browse Jobs - EscrowIQ{% endblock %}
+{% block content %}
+<div class="page-wrapper">
+  <div class="section-shell" style="margin-bottom:1rem">
+  <div class="flex items-center justify-between flex-wrap gap-4">
+    <div class="page-header" style="margin-bottom:0">
+      <h1 class="page-title">{% if user.role == 'freelancer' %}Matched jobs{% else %}Browse jobs{% endif %}</h1>
+      <p class="page-subtitle"><span id="visible-count">{{ jobs|length }}</span> {% if user.role == 'freelancer' %}job matches{% else %}open jobs{% endif %}</p>
+    </div>
+    <div class="flex gap-3 flex-wrap items-center">
+      <input type="text" id="search-input" class="form-input" placeholder="Search jobs or skills..." style="width:240px" oninput="filterJobs()">
+      <select id="risk-filter" class="form-select" style="width:150px" onchange="filterJobs()">
+        <option value="">All risk levels</option>
+        <option value="Low">Low Risk</option>
+        <option value="Medium">Medium Risk</option>
+        <option value="High">High Risk</option>
+      </select>
+    </div>
+  </div>
+  </div>
+
+  <div id="jobs-list">
+    {% if jobs %}
+    {% for job in jobs %}
+    <div class="card card-hover job-item" style="margin-bottom:.875rem;cursor:pointer"
+         data-title="{{ job.title|lower }}" data-skills="{{ job.skills_required|lower }}"
+         data-desc="{{ job.description|lower }}" data-risk="{{ job.fraud_level }}"
+         onclick="window.location.href='/jobs/{{ job.id }}'">
+      <div class="flex items-start justify-between flex-wrap gap-3">
+        <div style="flex:1;min-width:0">
+          <div class="flex items-center gap-3 flex-wrap" style="margin-bottom:.625rem">
+            <span class="font-semibold" style="font-size:1rem;color:var(--text)">{{ job.title }}</span>
+            {% if user.role == 'freelancer' and job.match_pct is defined %}<span class="badge badge-open">{{ job.match_pct }}% match</span>{% endif %}
+            <span class="badge badge-{{ job.fraud_level|lower }}">{{ job.fraud_level }} risk</span>
+          </div>
+          <div class="flex gap-4 flex-wrap text-sm text-muted" style="margin-bottom:.875rem">
+            <span>{{ job.client_name }}</span>
+            <span style="color:var(--accent);font-weight:600">${{ "%.0f"|format(job.budget) }}</span>
+            <span>{{ job.deadline }}</span>
+            <span>{{ job.proposal_count }} applied</span>
+          </div>
+          {% if user.role == 'freelancer' and job.matched_skills is defined %}
+          <div class="text-sm text-muted" style="margin-bottom:.3rem">Hybrid {{ job.match_pct }}% · Semantic {{ job.semantic_score }}% · Skill {{ job.skill_pct }}%</div>
+          <div class="text-sm text-muted" style="margin-bottom:.75rem">{% if job.matched_skills %}Matched skills: {{ job.matched_skills|join(', ') }}{% else %}Matched via semantic profile similarity{% endif %}</div>
+          {% else %}
+          <div class="text-sm text-muted" style="margin-bottom:.875rem;line-height:1.65">
+            {{ job.description[:160] }}{% if job.description|length > 160 %}...{% endif %}
+          </div>
+          {% endif %}
+          <div class="flex flex-wrap gap-2">
+            {% for skill in job.skills_required.split(',')[:7] %}<span class="skill-tag">{{ skill.strip() }}</span>{% endfor %}
+          </div>
+        </div>
+        <a href="/jobs/{{ job.id }}" class="btn btn-primary btn-sm" onclick="event.stopPropagation()">{% if user.role == 'freelancer' %}Open{% else %}Review{% endif %}</a>
+      </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="card"><div class="empty-state"><div class="empty-icon">0</div><div class="empty-title">{% if user.role == 'freelancer' %}No matched jobs yet{% else %}No open jobs yet{% endif %}</div><div class="empty-text">{% if user.role == 'freelancer' %}Add or refine your skills in your profile to see more aligned jobs.{% else %}Check back soon - clients post new jobs regularly.{% endif %}</div></div></div>
+    {% endif %}
+  </div>
+  <div id="no-results" style="display:none" class="card">
+    <div class="empty-state"><div class="empty-icon">0</div><div class="empty-title">No jobs match your search</div><div class="empty-text">Try different keywords or clear the filters.</div><button class="btn btn-ghost" onclick="clearFilters()">Clear filters</button></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function filterJobs() {
+  const q = document.getElementById('search-input').value.toLowerCase().trim();
+  const risk = document.getElementById('risk-filter').value;
+  let visible = 0;
+  document.querySelectorAll('.job-item').forEach(item => {
+    const mQ = !q || (item.dataset.title + ' ' + item.dataset.skills + ' ' + item.dataset.desc).includes(q);
+    const mR = !risk || item.dataset.risk === risk;
+    const show = mQ && mR;
+    item.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  document.getElementById('visible-count').textContent = visible;
+  document.getElementById('no-results').style.display = visible === 0 && document.querySelectorAll('.job-item').length > 0 ? '' : 'none';
+}
+function clearFilters() {
+  document.getElementById('search-input').value = '';
+  document.getElementById('risk-filter').value = '';
+  filterJobs();
+}
+</script>
+{% endblock %}

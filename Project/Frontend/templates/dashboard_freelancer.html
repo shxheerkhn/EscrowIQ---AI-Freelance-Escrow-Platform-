@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Freelancer Dashboard - EscrowIQ{% endblock %}
+{% block content %}
+<div class="page-wrapper">
+  <section class="section-shell" style="margin-bottom:1.4rem">
+    <div class="flex items-center justify-between flex-wrap gap-4">
+      <div>
+        <span class="eyebrow">Freelancer dashboard</span>
+        <h1 class="page-title" style="margin-top:.65rem">Opportunity board for {{ user.full_name or user.username }}</h1>
+        <p class="page-subtitle">Track matched jobs, proposals, and released earnings from one place.</p>
+      </div>
+      <a href="/jobs" class="btn btn-gradient btn-lg">Browse all matched jobs</a>
+    </div>
+  </section>
+
+  <div class="grid-4" style="margin-bottom:1.5rem">
+    <div class="stat-card interactive-card">
+      <div class="stat-icon-wrap stat-icon-cyan">M</div>
+      <div class="stat-label">Matched Jobs</div>
+      <div class="stat-value" id="s-available">-</div>
+      <div class="stat-sub">Jobs aligned with your profile</div>
+    </div>
+    <div class="stat-card interactive-card">
+      <div class="stat-icon-wrap stat-icon-violet">S</div>
+      <div class="stat-label">Applied</div>
+      <div class="stat-value" id="s-applied">-</div>
+      <div class="stat-sub">Proposals you have submitted</div>
+    </div>
+    <div class="stat-card interactive-card">
+      <div class="stat-icon-wrap stat-icon-emerald">A</div>
+      <div class="stat-label">Accepted</div>
+      <div class="stat-value" id="s-accepted">-</div>
+      <div class="stat-sub">Accepted offers</div>
+    </div>
+    <div class="stat-card interactive-card">
+      <div class="stat-icon-wrap stat-icon-amber">$</div>
+      <div class="stat-label">Balance</div>
+      <div class="stat-value" id="s-balance">-</div>
+      <div class="stat-sub">Released balance</div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('jobs', this)">Matched jobs ({{ jobs|length }})</button>
+    <button class="tab-btn" onclick="switchTab('proposals', this)">My work & proposals ({{ my_proposals|length }})</button>
+  </div>
+
+  <section id="tab-jobs" class="section-shell">
+    {% if jobs %}
+    <div style="display:grid;gap:.95rem">
+      {% for job in jobs %}
+      <article class="card card-hover interactive-card" style="cursor:pointer" onclick="window.location.href='/jobs/{{ job.id }}'">
+        <div class="flex items-start justify-between flex-wrap gap-3">
+          <div style="flex:1;min-width:0">
+            <div class="flex items-center gap-2 flex-wrap" style="margin-bottom:.6rem">
+              <span class="font-h" style="font-size:1rem">{{ job.title }}</span>
+              <span class="badge badge-open">{{ job.match_pct }}% match</span>
+              <span class="badge badge-{{ job.fraud_level|lower }}">{{ job.fraud_level }} risk</span>
+            </div>
+            <div class="flex gap-4 flex-wrap text-sm text-muted" style="margin-bottom:.8rem">
+              <span>{{ job.client_name }}</span>
+              <span>${{ "%.0f"|format(job.budget) }}</span>
+              <span>{{ job.deadline }}</span>
+              <span>{{ job.proposal_count }} applied</span>
+            </div>
+            <div class="text-sm text-muted" style="margin-bottom:.35rem">
+              Hybrid {{ job.match_pct }}% · Semantic {{ job.semantic_score }}% · Skill {{ job.skill_pct }}%
+            </div>
+            <div class="text-sm text-muted" style="margin-bottom:.8rem">
+              {% if job.matched_skills %}Matched skills: {{ job.matched_skills|join(', ') }}{% else %}Matched via semantic profile similarity{% endif %}
+            </div>
+            <div class="flex flex-wrap gap-2">
+              {% for skill in job.skills_required.split(',')[:6] %}
+              <span class="skill-tag">{{ skill.strip() }}</span>
+              {% endfor %}
+            </div>
+          </div>
+          <a href="/jobs/{{ job.id }}" class="btn btn-primary btn-sm" onclick="event.stopPropagation()">Open</a>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="card">
+      <div class="empty-state">
+        <div class="empty-icon">0</div>
+        <div class="empty-title">No matched work yet</div>
+        <div class="empty-text">Refine your profile skills and bio to improve how the matching engine routes jobs toward you.</div>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+
+  <section id="tab-proposals" class="section-shell" style="display:none">
+    {% if my_proposals %}
+    <div style="display:grid;gap:.95rem">
+      {% for p in my_proposals %}
+      <article class="card {% if p.status == 'accepted' %}card-emerald{% endif %} interactive-card">
+        <div class="flex items-start justify-between flex-wrap gap-3">
+          <div style="flex:1;min-width:0">
+            <div class="flex items-center gap-2 flex-wrap" style="margin-bottom:.55rem">
+              <span class="font-h" style="font-size:.98rem">{{ p.job_title }}</span>
+              <span class="badge badge-{{ p.status }}">{{ p.status }}</span>
+            </div>
+            <div class="flex gap-3 flex-wrap text-sm text-muted" style="margin-bottom:.75rem">
+              <span>{{ p.client_name }}</span>
+              <span>Your bid: ${{ "%.0f"|format(p.bid_amount) }}</span>
+              <span>Budget: ${{ "%.0f"|format(p.job_budget) }}</span>
+            </div>
+            <div class="card" style="padding:1rem;background:rgba(255,255,255,.02)">
+              <div class="text-xs text-dim" style="margin-bottom:.35rem">Proposal preview</div>
+              <div class="text-sm text-muted">{{ p.cover_letter[:220] }}{% if p.cover_letter|length > 220 %}...{% endif %}</div>
+            </div>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <a href="/jobs/{{ p.job_id }}" class="btn btn-primary btn-sm">
+              {% if p.status == 'accepted' and p.job_status in ['in_progress', 'submitted', 'disputed'] %}
+              My work
+              {% else %}
+              Open
+              {% endif %}
+            </a>
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="card">
+      <div class="empty-state">
+        <div class="empty-icon">0</div>
+        <div class="empty-title">No proposals sent yet</div>
+        <div class="empty-text">Apply to matched work to begin building accepted offers and funded escrow history.</div>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(async () => {
+  const { data } = await apiFetch('/api/stats');
+  if (!data) return;
+  animateCount(document.getElementById('s-available'), data.available_jobs || 0);
+  animateCount(document.getElementById('s-applied'), data.applied || 0);
+  animateCount(document.getElementById('s-accepted'), data.accepted || 0);
+  document.getElementById('s-balance').textContent = '$' + (data.balance || 0).toFixed(0);
+})();
+
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tab-jobs').style.display = tab === 'jobs' ? 'block' : 'none';
+  document.getElementById('tab-proposals').style.display = tab === 'proposals' ? 'block' : 'none';
+}
+</script>
+{% endblock %}

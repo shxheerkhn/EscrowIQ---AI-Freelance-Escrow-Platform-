@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Sign In - EscrowIQ{% endblock %}
+{% block extra_head %}
+<style>
+.auth-wrap {
+  min-height: calc(100vh - 7rem);
+  display: grid;
+  place-items: center;
+  padding: 1.5rem 0 3rem;
+}
+.auth-grid {
+  width: min(980px, 100%);
+  display: grid;
+  grid-template-columns: 0.95fr 1.05fr;
+  gap: 1rem;
+}
+.auth-panel,
+.auth-side {
+  border-radius: 24px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(18, 25, 34, 0.94), rgba(22, 31, 43, 0.98));
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  position: relative;
+}
+.auth-panel::before,
+.auth-side::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at top right, rgba(45, 212, 191, 0.08), transparent 24%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.06), transparent 26%);
+  pointer-events: none;
+}
+.auth-panel { padding: 2rem; }
+.auth-side {
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.auth-title {
+  font-family: var(--font-h);
+  font-size: clamp(1.45rem, 2vw, 2rem);
+  line-height: 1.14;
+  margin: 0.8rem 0 0.6rem;
+}
+.auth-copy { color: var(--text2); max-width: 34rem; }
+.auth-feeds {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.1rem;
+}
+.auth-feed {
+  padding: 0.9rem;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+}
+@media (max-width: 900px) {
+  .auth-grid { grid-template-columns: 1fr; }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-wrapper auth-wrap">
+  <div class="auth-grid">
+    <section class="auth-side interactive-card">
+      <div>
+        <span class="eyebrow">Account access</span>
+        <h1 class="auth-title">Sign in to continue your work.</h1>
+        <p class="auth-copy">Use your existing account to manage jobs, proposals, escrow, and payments.</p>
+      </div>
+      <div class="auth-feeds">
+        <div class="auth-feed">
+          <div class="text-xs text-dim">Client workflow</div>
+          <div style="font-size:.94rem;font-weight:600;margin:.35rem 0">Post, review, accept, fund</div>
+          <div class="text-sm text-muted">Handle hiring and payment steps from a single account.</div>
+        </div>
+        <div class="auth-feed">
+          <div class="text-xs text-dim">Freelancer workflow</div>
+          <div style="font-size:.94rem;font-weight:600;margin:.35rem 0">Match, apply, deliver, get paid</div>
+          <div class="text-sm text-muted">The dashboard stays role-aware after sign in.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="auth-panel">
+      <span class="eyebrow">Secure entry</span>
+      <div class="auth-title" style="font-size:1.5rem;margin-top:.9rem">Sign in</div>
+      <div class="auth-copy" style="margin-bottom:1.2rem">Enter your email and password to continue.</div>
+      <div id="alert-box"></div>
+
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <input type="email" id="email" class="form-input" placeholder="you@example.com">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input type="password" id="password" class="form-input" placeholder="Your password">
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:-.15rem;margin-bottom:.4rem">
+        <a href="/forgot-password" style="color:var(--cyan2);font-size:.88rem;text-decoration:none">Forgot password?</a>
+      </div>
+      <button class="btn btn-gradient w-full" style="margin-top:.6rem" onclick="doLogin()" id="login-btn">Enter dashboard</button>
+
+      <div class="divider-text">or</div>
+      <div style="text-align:center;font-size:.9rem;color:var(--text2)">
+        Need an account? <a href="/register" style="color:var(--cyan2);font-weight:800;text-decoration:none">Create one now</a>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function doLogin() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const btn = document.getElementById('login-btn');
+  const box = document.getElementById('alert-box');
+  if (!email || !password) {
+    box.innerHTML = '<div class="alert alert-error">Please fill all fields</div>';
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Entering';
+  const { ok, data } = await apiFetch('/api/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+  if (ok) {
+    showToast(`Welcome back, ${data.username}`, 'success');
+    setTimeout(() => { window.location.href = data.redirect; }, 700);
+  } else {
+    if (data.verification_required) {
+      box.innerHTML = `<div class="alert alert-warning">${data.error}. <a href="${data.redirect || `/verify-email?email=${encodeURIComponent(email)}`}" style="color:inherit;text-decoration:underline">Verify now</a></div>`;
+    } else {
+      box.innerHTML = `<div class="alert alert-error">${data.error}</div>`;
+    }
+    btn.disabled = false;
+    btn.innerHTML = 'Enter dashboard';
+  }
+}
+document.getElementById('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+document.getElementById('email').addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('password').focus(); });
+</script>
+{% endblock %}
