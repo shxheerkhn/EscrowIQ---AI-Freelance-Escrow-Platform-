@@ -1,308 +1,373 @@
 # EscrowIQ
 
-EscrowIQ is a Flask-based freelance marketplace prototype with escrow-backed payments, fraud scoring, hybrid freelancer matching, email verification, complaints/admin resolution, and in-app notifications.
+EscrowIQ is a freelance marketplace prototype built around an escrow-first workflow: clients post jobs, freelancers send proposals, one proposal is accepted, funds are locked in escrow, work is submitted for review, and payment is either released, revised, disputed, or refunded.
 
-## Overview
+The project combines a Flask backend, PostgreSQL persistence, server-rendered Jinja templates, session auth, SMTP email notifications, and lightweight AI-style features for fraud analysis, ranking, and proposal drafting.
 
-The application supports two primary roles:
+## Highlights
 
-- Clients can post jobs, review proposals, accept a freelancer, fund escrow, review submitted work, and raise complaints.
-- Freelancers can maintain a skills profile, browse matched jobs, submit proposals, deliver work, and track escrow-backed payments.
-
-An admin flow exists outside the normal user table and is configured through environment variables. Admins can review disputes and resolve them by releasing escrow, refunding the client, or closing the complaint without changing payout state.
-
-## Core Features
-
-- Role-based authentication with registration, login, logout, email verification, and password reset
-- Job posting and browsing with fraud analysis on submission
-- Proposal submission, acceptance, and rejection
-- Escrow deposit, release, and refund flows
-- Work delivery via note, external link, zip upload, or folder upload
-- Complaint/dispute workflow with admin resolution
-- In-app notifications plus SMTP email delivery
-- Job messaging between the accepted client and freelancer
-- AI-assisted fraud scoring, freelancer matching, and proposal drafting
+- Client and freelancer accounts with email verification
+- Session-based authentication with CSRF protection
+- Job posting with fraud scoring and validation
+- Proposal lifecycle with accept/reject flows
+- Escrow funding tied to the accepted freelancer and accepted bid amount
+- Work submission with delivery note, link, zip upload, or folder upload
+- Change requests, complaints, and admin complaint resolution
+- In-app notifications plus branded email notifications
+- AI-style fraud analysis, matching, and proposal generation
+- Cookie consent banner for a more realistic frontend experience
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Backend | Flask 3.x |
-| Database | PostgreSQL via SQLAlchemy Core + `psycopg2` |
-| Frontend | Jinja templates + vanilla JavaScript |
-| Matching / Fraud AI | scikit-learn TF-IDF + cosine similarity |
-| Auth | Session-based auth |
-| Email | SMTP |
+- Backend: Flask, SQLAlchemy Core, psycopg2
+- Database: PostgreSQL
+- Frontend: Jinja2 templates, vanilla JavaScript, custom CSS
+- ML / scoring: scikit-learn TF-IDF similarity plus rule-based logic
+- Email: SMTP
+- Password hashing: Werkzeug security helpers
+- Testing: Python `unittest`
 
-## Project Structure
+## Repository Layout
 
 ```text
 Project/
-├── Backend/
-│   ├── app.py
-│   ├── fraud_detection.py
-│   ├── ml_matching.py
-│   ├── run.py
-│   ├── seed_ai_test_data.py
-│   └── requirements.txt
-├── Frontend/
-│   ├── static/
-│   └── templates/
-├── tests/
-│   └── test_core_flows.py
-├── AI_TEST_CASES.md
-├── PROPOSAL_ALIGNMENT_REVIEW.md
-├── VERCEL_DEPLOYMENT.md
-├── requirements.txt
-└── vercel.json
+├─ Backend/
+│  ├─ app.py                  # Main Flask app, routes, schema creation, emails, escrow logic
+│  ├─ run.py                  # Local startup + demo data seeding
+│  ├─ seed_ai_test_data.py    # Optional AI-specific seed script
+│  ├─ fraud_detection.py      # Fraud scoring logic
+│  ├─ ml_matching.py          # TF-IDF semantic matching helpers
+│  ├─ requirements.txt        # Backend dependency list
+│  ├─ .env                    # Local environment variables
+│  └─ uploads/                # Submitted work archives
+├─ Frontend/
+│  ├─ templates/              # Jinja templates
+│  └─ static/                 # Static assets, images, logo
+├─ tests/
+│  └─ test_core_flows.py      # Integration-style workflow tests
+├─ requirements.txt           # Root dependency list
+├─ AI_TEST_CASES.md
+├─ PROPOSAL_ALIGNMENT_REVIEW.md
+├─ VERCEL_DEPLOYMENT.md
+└─ vercel.json
 ```
 
-## Architecture Notes
+## Core User Flows
 
-- `Backend/app.py` is the main application entrypoint and currently contains routes, schema initialization, auth helpers, notification/email helpers, business logic, and some AI-related orchestration.
-- `Backend/fraud_detection.py` contains the hybrid fraud scoring logic.
-- `Backend/ml_matching.py` contains TF-IDF semantic freelancer matching.
-- Templates live under `Frontend/templates`, while static assets live under `Frontend/static`.
-- The database schema is created automatically at startup through `init_db()`.
+### Client Flow
 
-## AI Features
+1. Register and verify email
+2. Post a job with title, description, skills, budget, and deadline
+3. Review incoming proposals
+4. Accept one proposal
+5. Fund escrow for the accepted freelancer
+6. Review submitted work
+7. Approve work, request changes, or file a complaint
 
-### 1. Fraud Detection
+### Freelancer Flow
 
-Jobs are analyzed before being saved. The fraud system supports:
+1. Register with at least one skill and a stronger password
+2. Verify email and complete profile
+3. Browse jobs or matched opportunities
+4. Submit a proposal with bid, timeline, and cover letter
+5. Wait for acceptance and escrow funding
+6. Submit work using note, link, zip, or folder upload
+7. Respond to changes requested or complaint outcomes
 
-- Rule-based scoring
-- TF-IDF semantic similarity scoring
-- Hybrid mode combining both
+### Admin Flow
 
-Environment flags:
+1. Sign in using `ADMIN_EMAIL` and `ADMIN_PASSWORD`
+2. Review complaint queue
+3. Resolve with one of:
+   - `release`
+   - `refund`
+   - `close`
+4. System updates escrow, job, and submission state atomically
 
-- `AI_MODE=rules|hybrid|model`
-- `AI_FALLBACK_ENABLED=true|false`
+## Feature Breakdown
 
-### 2. Hybrid Freelancer Matching
+### Authentication and Account Security
 
-Clients can view recommended freelancers for a job, and freelancers can see jobs matched to their profile. Matching combines:
+- Email verification by 6-digit code
+- Password reset by 6-digit code
+- Session-backed login
+- CSRF enforcement for mutating API routes
+- Registration validation:
+  - freelancer skills required
+  - stronger passwords required
+- Profile editing for name, bio, and freelancer skills
 
-- Semantic similarity
-- Skill overlap
-- Rating normalization
-- Review-count/experience weighting
+### Job Posting
 
-### 3. Proposal Generation
+- Clients only
+- Required fields:
+  - title
+  - description
+  - required skills
+  - budget
+  - deadline
+- Validation includes:
+  - minimum title length
+  - more realistic description length / word count
+  - at least 2 required skills
+  - valid future deadline
 
-Freelancers can generate proposal drafts from job context. The current implementation is template-driven and produces editable starter content rather than final submissions.
+### Proposal Lifecycle
+
+- Freelancers only
+- One proposal per freelancer per job
+- Clients can accept one proposal
+- Other pending proposals are auto-rejected when one is accepted
+- Proposal events create in-app notifications and branded emails
+
+### Escrow
+
+- Only clients can fund escrow
+- Only for the accepted freelancer
+- Escrow amount must match the accepted bid amount
+- Balance is deducted atomically when escrow is created
+- Release / refund actions update balances and statuses atomically
+
+### Work Submission
+
+- Freelancer must be the accepted freelancer
+- Escrow must already be funded
+- Supported submission content:
+  - delivery note
+  - external work link
+  - zip file
+  - folder upload packaged server-side into a zip
+- Validation includes:
+  - no empty submissions
+  - `http://` or `https://` link format
+  - zip / folder mutual exclusivity
+
+### Review, Revisions, and Complaints
+
+- Clients can:
+  - approve work
+  - request changes
+  - file a complaint
+- Change requests require detailed feedback
+- Complaints move the job into a disputed state
+- Admin can resolve complaints and notify both parties
+
+### Notifications and Email
+
+- In-app notification dropdown
+- Email notifications for:
+  - verification
+  - password reset
+  - proposals
+  - escrow funding
+  - work submitted
+  - changes requested
+  - complaint opened
+  - complaint resolved
+  - payment released
+- Branded HTML email layout with embedded logo support
+
+### AI / Ranking Features
+
+#### Fraud Detection
+
+- Rule-based and TF-IDF-style hybrid scoring
+- Risk labels:
+  - Low
+  - Medium
+  - High
+- Stores fraud reasons and score per job
+
+#### Matching
+
+- Semantic similarity using TF-IDF
+- Skill overlap and synonym expansion
+- Rating and review count signal blending
+
+#### Proposal Generation
+
+- Template-based proposal drafts
+- Uses job title, description, and skill context
 
 ## Local Setup
 
 ### Prerequisites
 
 - Python 3.10+
-- PostgreSQL running locally
-- A PostgreSQL database created manually before first run
+- PostgreSQL
 - SMTP credentials for email delivery
 
-### 1. Install Dependencies
+### Install Dependencies
 
 From the project root:
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-Or from `Backend/`:
+If you prefer the backend-specific list:
 
-```bash
-pip install -r requirements.txt
+```powershell
+pip install -r Backend/requirements.txt
 ```
 
-### 2. Create `Backend/.env`
+## Environment Variables
 
-Example:
+This project currently reads local environment variables from `Backend/.env`.
+
+Typical keys used by the app:
 
 ```env
-SECRET_KEY=replace-me
-DATABASE_URL=postgresql://postgres:your_password@localhost:5432/escrowIQ_db
-PORT=5000
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=12345678
+SECRET_KEY=change-me
+DATABASE_URL=postgresql://username:password@localhost:5432/escrowiq
+
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
-SMTP_USERNAME=your_email@gmail.com
-SMTP_PASSWORD=your_app_password
-SMTP_FROM_EMAIL=your_email@gmail.com
+SMTP_USERNAME=your-email@example.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM_EMAIL=your-email@example.com
 SMTP_USE_TLS=true
+
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=change-me
+FOUNDER_ALERT_EMAILS=founder@example.com
+
 SESSION_COOKIE_SECURE=false
-FOUNDER_ALERT_EMAILS=founder1@example.com,founder2@example.com
 AI_MODE=hybrid
 AI_FALLBACK_ENABLED=true
 ```
 
-Notes:
+## Running the App
 
-- `DATABASE_URL` must point to an existing PostgreSQL database.
-- The app creates tables automatically, but it does not create the PostgreSQL database itself.
-- Gmail requires an App Password if 2FA is enabled.
+The intended local entry point is:
 
-### 3. Run the App
-
-Recommended:
-
-```bash
-cd Backend
-python run.py
+```powershell
+python Backend/run.py
 ```
 
-Alternative:
+What `Backend/run.py` does:
 
-```bash
-cd Backend
-python app.py
-```
+- loads `Backend/.env`
+- initializes the schema if needed
+- seeds demo users and jobs
+- starts the Flask app
 
-Why `run.py` is recommended:
-
-- It initializes the schema
-- It seeds demo users/jobs
-- It prints startup diagnostics
-
-The app will be available at:
+Default local URL:
 
 ```text
 http://localhost:5000
 ```
 
-## Demo Data
+## Demo / Seed Data
 
-`Backend/run.py` seeds demo accounts automatically when started successfully.
+`Backend/run.py` seeds sample clients, freelancers, and jobs for a richer local demo.
 
-Default demo password:
+There is also an optional AI-focused seed script:
+
+```powershell
+python Backend/seed_ai_test_data.py
+```
+
+That script creates:
+
+- `ai_test_client@escrowiq.local`
+- several freelancer profiles with matching-friendly skills
+- jobs tailored to fraud scoring and recommendation scenarios
+
+Default seeded password used there:
 
 ```text
 demo123
 ```
 
-Seeded accounts include:
+## Running Tests
 
-- Client demo users
-- Freelancer demo users
-- Welcome notifications
-- Dynamic demo job postings
-
-You can also seed AI-specific test data manually:
-
-```bash
-cd Backend
-python seed_ai_test_data.py
-```
-
-See [AI_TEST_CASES.md](AI_TEST_CASES.md) for suggested fraud and matching scenarios.
-
-## Testing
-
-Integration-style tests live in [tests/test_core_flows.py](tests/test_core_flows.py).
-
-They cover major flows including:
-
-- Registration, verification, and login
-- Password reset
-- Proposal acceptance rules
-- Escrow funding/release/refund
-- Work submission
-- Complaint resolution
-- Notification/email side effects
-
-Run tests from the project root:
-
-```bash
+```powershell
 python -m unittest tests.test_core_flows
 ```
 
-Important:
+Notes:
 
-- Tests require a valid PostgreSQL `DATABASE_URL`
-- The suite is skipped if PostgreSQL is not configured
+- tests are integration-style and expect PostgreSQL
+- if `DATABASE_URL` is missing or not PostgreSQL, tests are skipped
+- some test behavior depends on app config such as `TESTING=True`
 
-## Deployment
+## Important Files
 
-### Vercel
+### Backend
 
-This repo includes [vercel.json](vercel.json) to route requests to `Backend/app.py`.
+- [Backend/app.py](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Backend/app.py>)
+  Main application logic, routes, schema management, validation, escrow, emails, notifications.
 
-If this project is deployed from a larger monorepo, set the Vercel root directory to:
+- [Backend/run.py](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Backend/run.py>)
+  Local startup script and demo data seeding.
 
-```text
-Project
+- [Backend/seed_ai_test_data.py](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Backend/seed_ai_test_data.py>)
+  Optional AI testing dataset.
+
+- [Backend/fraud_detection.py](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Backend/fraud_detection.py>)
+  Fraud analysis implementation.
+
+- [Backend/ml_matching.py](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Backend/ml_matching.py>)
+  TF-IDF semantic matching logic.
+
+### Frontend
+
+- [Frontend/templates/base.html](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Frontend/templates/base.html>)
+  Shared layout, navbar, notifications, toast system, cookie consent banner.
+
+- [Frontend/templates/dashboard_client.html](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Frontend/templates/dashboard_client.html>)
+  Client dashboard and job creation UI.
+
+- [Frontend/templates/job_detail.html](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/Frontend/templates/job_detail.html>)
+  Proposal review, escrow actions, work submission, complaint flow.
+
+## Deployment Notes
+
+This repository includes:
+
+- [vercel.json](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/vercel.json>)
+- [VERCEL_DEPLOYMENT.md](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/VERCEL_DEPLOYMENT.md>)
+
+Before deployment:
+
+- set all required environment variables
+- ensure PostgreSQL is reachable from the host
+- confirm SMTP credentials are valid in production
+- set `SESSION_COOKIE_SECURE=true` behind HTTPS
+- use a strong `SECRET_KEY`
+
+## Current Realism / UX Notes
+
+- The new cookie banner is a frontend realism feature and stores consent in `localStorage`
+- Essential cookies are still used by the app for sessions and CSRF regardless of optional preference consent
+- The project is still a prototype, not a production-hardened legal/privacy implementation
+
+## Known Limitations
+
+- No full migrations system such as Alembic
+- Cookie consent is UI-only, not a full compliance framework
+- SMTP and admin auth are environment-driven and fairly simple
+- The app uses server-rendered templates rather than a component frontend
+- Some docs in the repository are legacy notes and overlap with this README
+
+## Related Project Notes
+
+- [AI_TEST_CASES.md](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/AI_TEST_CASES.md>)
+- [PROPOSAL_ALIGNMENT_REVIEW.md](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/PROPOSAL_ALIGNMENT_REVIEW.md>)
+- [VERCEL_DEPLOYMENT.md](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/VERCEL_DEPLOYMENT.md>)
+- [# EscrowIQ — Developer README.txt](</d:/FAST 6th Semester/Web Programming/Semester Project/Project Files/Web-Programming-main/Web-Programming-main/Project/# EscrowIQ — Developer README.txt>)
+
+## Quick Start Summary
+
+```powershell
+pip install -r requirements.txt
+python Backend/run.py
 ```
 
-Required production environment variables include:
+Then open:
 
-- `SECRET_KEY`
-- `DATABASE_URL`
-- `ADMIN_EMAIL`
-- `ADMIN_PASSWORD`
-- `SMTP_HOST`
-- `SMTP_PORT`
-- `SMTP_USERNAME`
-- `SMTP_PASSWORD`
-- `SMTP_FROM_EMAIL`
-
-Production notes:
-
-- Do not use a local `localhost` database URL on Vercel
-- Use a hosted PostgreSQL database instead
-- Set `SESSION_COOKIE_SECURE=true`
-- Uploaded files are currently stored on the local filesystem, which is not durable on typical serverless platforms
-
-See [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md) for the current deployment notes.
-
-## Main Routes
-
-### Pages
-
-- `/`
-- `/register`
-- `/login`
-- `/verify-email`
-- `/forgot-password`
-- `/dashboard`
-- `/jobs`
-- `/jobs/<job_id>`
-- `/profile`
-- `/escrow`
-- `/admin/complaints`
-
-### APIs
-
-- `/api/register`
-- `/api/login`
-- `/api/logout`
-- `/api/auth/verify-email`
-- `/api/auth/resend-verification`
-- `/api/auth/request-password-reset`
-- `/api/auth/reset-password`
-- `/api/jobs`
-- `/api/proposals`
-- `/api/escrow/deposit`
-- `/api/submissions/<submission_id>/approve`
-- `/api/jobs/<job_id>/complaints`
-- `/api/admin/complaints/<complaint_id>/resolve`
-- `/api/ai/generate-proposal`
-- `/api/ai/analyze-fraud`
-- `/api/ai/match-freelancers/<job_id>`
-- `/api/ai/ml-match/<job_id>`
-
-## Current Limitations
-
-- `Backend/app.py` is still monolithic and would benefit from blueprints/services
-- Proposal generation is template-based, not LLM-backed
-- File uploads are stored locally rather than in object storage
-- Some deployment targets may need extra handling for persistent file storage
-- There is a Python deprecation warning around `datetime.utcnow()` that should be cleaned up later
-
-## Additional Documentation
-
-- [AI_TEST_CASES.md](AI_TEST_CASES.md)
-- [PROPOSAL_ALIGNMENT_REVIEW.md](PROPOSAL_ALIGNMENT_REVIEW.md)
-- [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md)
+```text
+http://localhost:5000
+```
 
